@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Pic Expert",
+  "version": "0.1.0",
+  "description": "按当前查询结果批量下载订单 SN 码与发票图片，并生成汇总清单。",
+  "permissions": ["activeTab", "downloads", "scripting", "storage", "tabs"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Pic Expert",
+    "default_popup": "popup.html"
+  }
+}
