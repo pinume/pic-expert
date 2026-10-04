@@ -1,5 +1,5 @@
 importScripts("core.js");
-const { sanitizePathPart, buildManifestCsv, makeTaskId } = globalThis.PIC_EXPERT_CORE;
+const { sanitizePathPart, buildManifestCsv, makeTaskId, REQUIRED_KINDS, ASSET_KINDS, manifestFiles } = globalThis.PIC_EXPERT_CORE;
 const TASK_KEY = "picExpertTask";
 const pairs = new Map();
 const endings = new Map();
@@ -59,16 +59,20 @@ const patchTask = (id, sender, operation, running = true) => mutate(async () => 
 });
 const validateAssets = assets => {
   const formats = { ".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp" };
-  for (const kind of ["SN码", "发票"]) {
+  if (!assets || REQUIRED_KINDS.some(kind => !assets[kind])) throw new Error("必须提供 SN码和发票两张图片。");
+  if (Object.keys(assets).some(kind => !ASSET_KINDS.includes(kind))) throw new Error("图片类型不受支持。");
+  const kinds = ASSET_KINDS.filter(kind => Object.hasOwn(assets, kind));
+  for (const kind of kinds) {
     const asset = assets?.[kind];
     if (!asset || !formats[asset.extension] || !asset.url?.startsWith("data:" + formats[asset.extension] + ";base64,")) {
-      throw new Error("必须提供两张已验证格式的图片。");
+      throw new Error(kind + "图片格式未验证。");
     }
   }
+  return kinds;
 };
 const downloadPair = async (message, sender) => {
   const { taskId, orderNo, referenceNo, assets } = message;
-  validateAssets(assets);
+  const kinds = validateAssets(assets);
   if (!orderNo || !/^[A-Za-z0-9_-]+$/.test(referenceNo || "")) throw new Error("订单身份不完整。");
   const key = taskId + "::" + referenceNo;
   await patchTask(taskId, sender, task => {
@@ -84,7 +88,7 @@ const downloadPair = async (message, sender) => {
     if (pair.status === "complete") return pair.files;
     if (pair.status === "failed") throw new Error(pair.error || "该参考号下载失败，需重新运行任务。");
     try {
-      for (const kind of ["SN码", "发票"]) {
+      for (const kind of kinds) {
         task = await getTask();
         assertTask(task, taskId, sender);
         const existing = task.downloads[referenceNo].files[kind];
@@ -100,7 +104,7 @@ const downloadPair = async (message, sender) => {
       }
       task = await patchTask(taskId, sender, t => {
         t.downloads[referenceNo].status = "complete";
-        appendLog(t, "配对完成", "参考号 " + referenceNo + "，两张图片下载完成");
+        appendLog(t, "配对完成", "参考号 " + referenceNo + "，共 " + kinds.length + " 张图片下载完成");
       });
       return task.downloads[referenceNo].files;
     } catch (error) {
@@ -168,12 +172,11 @@ const finalizeTask = (message, sender) => {
             row.result = "失败";
             row.reason = [...new Set([row.reason, pair.error || "下载未完成。"].filter(Boolean))].join("；");
           }
-          row.snFile = pair.files["SN码"]?.filename || "";
-          row.invoiceFile = pair.files["发票"]?.filename || "";
+          Object.assign(row, manifestFiles(pair.files));
           if (!existing) t.manifestRows.push(row);
         }
         if (t.currentRow && !t.manifestRows.some(row => row.orderNo === t.currentRow.orderNo && row.referenceNo === t.currentRow.referenceNo)) {
-          t.manifestRows.push({ ...t.currentRow, result: "失败", reason: t.error || "任务中断。", snFile: "", invoiceFile: "" });
+          t.manifestRows.push({ ...t.currentRow, result: "失败", reason: t.error || "任务中断。", ...manifestFiles() });
         }
         delete t.currentRow;
         t.scanned = t.manifestRows.length;

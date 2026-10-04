@@ -22,6 +22,7 @@ function harness(options = {}, initial = null) {
         const id = calls.length + 1;
         calls.push(args);
         const failed = (options.failInvoice && args.filename.includes("发票")) ||
+          (options.failProof && args.filename.includes(options.failProof)) ||
           (options.failManifest && args.filename.endsWith(".csv"));
         items.set(id, { id, state: failed ? "interrupted" : options.holdPair && !args.filename.endsWith(".csv") ? "in_progress" : "complete", error: failed ? "NETWORK_FAILED" : undefined });
         return id;
@@ -29,7 +30,7 @@ function harness(options = {}, initial = null) {
       search: async ({ id }) => items.has(id) ? [items.get(id)] : [],
       cancel: async id => { if (items.has(id)) items.get(id).state = "interrupted"; },
       removeFile: async id => {
-        if (options.failRemove && id === 1) throw new Error("file_locked");
+        if ((options.failRemove && id === 1) || options.failRemoveId === id) throw new Error("file_locked");
         removed.push(id);
       }
     }
@@ -200,4 +201,42 @@ test("paired downloads and CSV completion are persisted in task logs", async () 
   assert.equal(logs.filter(entry => entry.stage === "下载图片").length, 2);
   assert.ok(logs.some(entry => entry.stage === "配对完成"));
   assert.ok(logs.some(entry => entry.stage === "下载清单" && entry.message.includes("清单已下载")));
+});
+const proofAssets = {...assets,"证明材料图一":assets["SN码"],"证明材料图二":assets["发票"],"证明材料图三":assets["SN码"]};
+test("duplicate messages download five correctly named files once and include proof paths in CSV", async () => {
+  const h = harness(), {task} = await h.begin();
+  const message = {type:"PIC_EXPERT_DOWNLOAD_PAIR",taskId:task.id,orderNo:"O1",referenceNo:"R1",assets:proofAssets};
+  const results = await Promise.all([h.send(message),h.send(message)]);
+  assert.ok(results.every(r => r.ok));
+  assert.equal(h.calls.length, 5);
+  assert.match(h.calls[2].filename, /\/R1\/证明材料图一.jpg$/);
+  assert.match(h.calls[3].filename, /\/R1\/证明材料图二.png$/);
+  assert.match(h.calls[4].filename, /\/R1\/证明材料图三.jpg$/);
+  await h.send({type:"PIC_EXPERT_TASK_END",taskId:task.id,status:"completed"});
+  assert.equal(h.task().manifestRows[0].proof2File, h.calls[3].filename);
+  assert.match(decodeURIComponent(h.calls[5].url), /证明材料图三.jpg/);
+});
+test("failed proof image rolls back required and optional files and never succeeds", async () => {
+  const h = harness({failProof:"证明材料图二"}), {task} = await h.begin();
+  const response = await h.send({type:"PIC_EXPERT_DOWNLOAD_PAIR",taskId:task.id,orderNo:"O1",referenceNo:"R1",assets:proofAssets});
+  assert.equal(response.ok, false);
+  assert.equal(h.calls.length, 4);
+  assert.deepEqual(h.removed, [1,2,3,4]);
+  await h.send({type:"PIC_EXPERT_TASK_END",taskId:task.id,status:"completed"});
+  assert.equal(h.task().manifestRows[0].result, "失败");
+  assert.equal(h.task().manifestRows[0].proof1File, "");
+});
+test("failed proof cleanup retains its path in the manifest", async () => {
+  const h = harness({failProof:"证明材料图二",failRemoveId:3}), {task} = await h.begin();
+  await h.send({type:"PIC_EXPERT_DOWNLOAD_PAIR",taskId:task.id,orderNo:"O1",referenceNo:"R1",assets:proofAssets});
+  await h.send({type:"PIC_EXPERT_TASK_END",taskId:task.id,status:"failed"});
+  assert.match(h.task().manifestRows[0].proof1File, /证明材料图一.jpg$/);
+  assert.equal(h.task().manifestRows[0].snFile, "");
+});
+test("missing required pair or invalid optional format creates no downloads", async () => {
+  const h = harness(), {task} = await h.begin();
+  for (const value of [{"证明材料图一":assets["SN码"]},{...assets,"证明材料图一":{extension:".html",url:"data:text/html;base64,AA=="}}]) {
+    assert.equal((await h.send({type:"PIC_EXPERT_DOWNLOAD_PAIR",taskId:task.id,orderNo:"O1",referenceNo:"R1",assets:value})).ok, false);
+  }
+  assert.equal(h.calls.length, 0);
 });

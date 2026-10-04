@@ -22,12 +22,9 @@
     const text = normalize(label).replace(/^[（(](?:必填|选填)[）)]/, "").replace(/[:：]$/, "");
     if (/^(?:S\/?N码(?:照片|图片)?|序列号(?:照片|图片)?)$/i.test(text)) return "SN码";
     if (/^发票(?:照片|图片)?$/.test(text)) return "发票";
+    const proof = text.match(/^证明材料图([一二三123])$/);
+    if (proof) return "证明材料图" + ({1:"一",2:"二",3:"三"}[proof[1]] || proof[1]);
     return null;
-  };
-  const dateRange = (value) => {
-    const matches = String(value).match(/\d{4}[/-]\d{1,2}[/-]\d{1,2}/g);
-    if (matches?.length !== 2) throw new Error("无法解析原查询日期，已停止。");
-    return matches.map(s => s.split(/[/-]/).map(Number).join("-"));
   };
   const chooseFrame = (results) => {
     const frames = results.filter(x => x.result?.ok && x.result.ready);
@@ -38,7 +35,7 @@
     const escaped = String(orderNo).replace(/[.*+?^\$\{\}()|[\]\\]/g, "\\$&");
     return Boolean(orderNo) && new RegExp(`(?:^|[^a-zA-Z0-9])${escaped}(?:$|[^a-zA-Z0-9])`).test(text);
   };
-  const api = Object.freeze({ normalize, inferColumns, isMaterialModification, chooseUnique, assetKind, dateRange, chooseFrame, hasIdentity });
+  const api = Object.freeze({ normalize, inferColumns, isMaterialModification, chooseUnique, assetKind, chooseFrame, hasIdentity });
   globalThis.PIC_EXPERT_PAGE_CORE = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();
