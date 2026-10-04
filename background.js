@@ -1,148 +1,233 @@
 importScripts("core.js");
-
-const { sanitizePathPart, extensionFromUrl, buildManifestCsv, makeTaskId } = globalThis.PIC_EXPERT_CORE;
+const { sanitizePathPart, buildManifestCsv, makeTaskId } = globalThis.PIC_EXPERT_CORE;
 const TASK_KEY = "picExpertTask";
-const activeDownloads = new Map();
-
-const storageGet = async () => (await chrome.storage.local.get(TASK_KEY))[TASK_KEY] || null;
-const storageSet = async (task) => chrome.storage.local.set({ [TASK_KEY]: task });
-
-const updateTask = async (patch) => {
-  const current = await storageGet();
-  if (!current) return null;
-  const next = { ...current, ...patch, updatedAt: new Date().toISOString() };
-  await storageSet(next);
-  return next;
-};
-
-const waitForDownload = (downloadId, timeoutMs = 120000) => new Promise((resolve, reject) => {
-  let timer;
-  const finish = (error, value) => {
-    chrome.downloads.onChanged.removeListener(listener);
-    clearTimeout(timer);
-    error ? reject(error) : resolve(value);
-  };
-  const listener = (delta) => {
-    if (delta.id !== downloadId) return;
-    if (delta.error?.current) finish(new Error(delta.error.current));
-    else if (delta.state?.current === "interrupted") finish(new Error("download_interrupted"));
-    else if (delta.state?.current === "complete") finish(null, downloadId);
-  };
-  chrome.downloads.onChanged.addListener(listener);
-  timer = setTimeout(() => finish(new Error("download_timeout")), timeoutMs);
-});
-
-const startTask = async ({ sourceUrl = "" } = {}) => {
-  const existing = await storageGet();
-  if (existing && existing.status === "running") {
-    throw new Error("已有下载任务正在运行，请等待当前任务完成。 ");
-  }
-  const task = {
-    id: makeTaskId(),
-    status: "running",
-    sourceUrl,
-    startedAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    page: 1,
-    scanned: 0,
-    completed: 0,
-    skipped: 0,
-    failed: 0,
-    manifestRows: [],
-    downloads: {}
-  };
-  await storageSet(task);
-  return task;
-};
-
-const appendManifestRow = async (taskId, row) => {
-  const task = await storageGet();
-  if (!task || task.id !== taskId || task.status !== "running") throw new Error("任务身份已失效。 ");
-  const key = `${row.orderNo}::${row.referenceNo}`;
-  const existingIndex = task.manifestRows.findIndex((item) => `${item.orderNo}::${item.referenceNo}` === key);
-  if (existingIndex >= 0) task.manifestRows[existingIndex] = row;
-  else task.manifestRows.push(row);
-  task.updatedAt = new Date().toISOString();
-  await storageSet(task);
-  return task;
-};
-
-const downloadFile = async ({ taskId, referenceNo, kind, url }) => {
-  const task = await storageGet();
-  if (!task || task.id !== taskId || task.status !== "running") throw new Error("任务身份已失效。 ");
-  if (!referenceNo || !["SN码", "发票"].includes(kind) || !url) throw new Error("下载参数不完整。 ");
-
-  const dedupeKey = `${taskId}::${referenceNo}::${kind}`;
-  if (task.downloads[dedupeKey]?.status === "complete") return task.downloads[dedupeKey];
-  if (activeDownloads.has(dedupeKey)) return activeDownloads.get(dedupeKey);
-
-  const promise = (async () => {
-    const reference = sanitizePathPart(referenceNo, "unknown-reference");
-    const extension = extensionFromUrl(url);
-    const filename = `pic-expert/${taskId}/${reference}/${kind}${extension}`;
-    const downloadId = await chrome.downloads.download({ url, filename, saveAs: false, conflictAction: "uniquify" });
-    if (!Number.isInteger(downloadId)) throw new Error("Chrome 未返回有效下载编号。 ");
-    await waitForDownload(downloadId);
-    const current = await storageGet();
-    if (!current || current.id !== taskId || current.status !== "running") throw new Error("下载完成时任务身份已失效。 ");
-    const result = { status: "complete", downloadId, filename };
-    current.downloads[dedupeKey] = result;
-    current.updatedAt = new Date().toISOString();
-    await storageSet(current);
-    return result;
-  })().finally(() => activeDownloads.delete(dedupeKey));
-
-  activeDownloads.set(dedupeKey, promise);
+const pairs = new Map();
+const endings = new Map();
+let stateQueue = Promise.resolve();
+const getTask = async () => (await chrome.storage.local.get(TASK_KEY))[TASK_KEY] || null;
+const saveTask = task => chrome.storage.local.set({ [TASK_KEY]: task });
+const mutate = operation => {
+  const promise = stateQueue.then(operation);
+  stateQueue = promise.catch(() => {});
   return promise;
 };
-
-const finalizeTask = async ({ taskId, status = "completed", error = "" }) => {
-  const task = await storageGet();
-  if (!task || task.id !== taskId) throw new Error("任务身份已失效。 ");
-  const csv = buildManifestCsv(task.manifestRows || []);
-  const dataUrl = `data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`;
-  const manifestFilename = `pic-expert/${taskId}/下载清单.csv`;
-  const manifestDownloadId = await chrome.downloads.download({
-    url: dataUrl,
-    filename: manifestFilename,
-    saveAs: false,
-    conflictAction: "uniquify"
-  });
-  await waitForDownload(manifestDownloadId);
-  task.status = status;
-  task.error = error;
-  task.manifestFilename = manifestFilename;
-  task.finishedAt = new Date().toISOString();
-  task.updatedAt = task.finishedAt;
-  await storageSet(task);
-  return task;
+const assertTask = (task, id, sender, running = true) => {
+  if (!task || task.id !== id || (running && task.status !== "running")) throw new Error("任务身份已失效。");
+  if (sender.tab && (sender.tab.id !== task.tabId || sender.frameId !== task.frameId)) throw new Error("消息来自其他页面或 frame。");
 };
-
+const waitForDownload = async (id, timeoutMs = 120000, taskId = null) => {
+  if (!Number.isInteger(id)) throw new Error("Chrome 未返回有效下载编号。");
+  // Read persistent state: completion may precede listener setup or worker restart.
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (taskId) {
+      const task = await getTask();
+      if (task?.id !== taskId || task.status !== "running") throw new Error("任务已停止。");
+    }
+    const [item] = await chrome.downloads.search({ id });
+    if (!item) throw new Error("下载记录丢失。");
+    if (item.state === "complete") return item;
+    if (item.state === "interrupted") throw new Error(item.error || "download_interrupted");
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  throw new Error("download_timeout");
+};
+const startTask = message => mutate(async () => {
+  const existing = await getTask();
+  if (["running", "stopping", "finalizing"].includes(existing?.status)) throw new Error("已有任务正在运行；页面中断时请先点击停止任务。");
+  if (!Number.isInteger(message.tabId) || !Number.isInteger(message.frameId)) throw new Error("目标页面不完整。");
+  const task = { id: makeTaskId(), status: "running", tabId: message.tabId, frameId: message.frameId,
+    sourceUrl: message.sourceUrl, startedAt: new Date().toISOString(), page: 1,
+    scanned: 0, completed: 0, skipped: 0, failed: 0, manifestRows: [], downloads: {} };
+  await saveTask(task);
+  return task;
+});
+const patchTask = (id, sender, operation, running = true) => mutate(async () => {
+  const task = await getTask();
+  assertTask(task, id, sender, running);
+  operation(task);
+  task.updatedAt = new Date().toISOString();
+  await saveTask(task);
+  return task;
+});
+const validateAssets = assets => {
+  const formats = { ".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp" };
+  for (const kind of ["SN码", "发票"]) {
+    const asset = assets?.[kind];
+    if (!asset || !formats[asset.extension] || !asset.url?.startsWith("data:" + formats[asset.extension] + ";base64,")) {
+      throw new Error("必须提供两张已验证格式的图片。");
+    }
+  }
+};
+const downloadPair = async (message, sender) => {
+  const { taskId, orderNo, referenceNo, assets } = message;
+  validateAssets(assets);
+  if (!orderNo || !/^[A-Za-z0-9_-]+$/.test(referenceNo || "")) throw new Error("订单身份不完整。");
+  const key = taskId + "::" + referenceNo;
+  await patchTask(taskId, sender, task => {
+    const previous = task.downloads[referenceNo];
+    if (previous && previous.orderNo !== orderNo) throw new Error("同一参考号对应多个订单，已停止。");
+    if (!previous) task.downloads[referenceNo] = { orderNo, status: "pending", files: {} };
+  });
+  if (pairs.has(key)) return pairs.get(key);
+  const promise = (async () => {
+    let task = await getTask();
+    assertTask(task, taskId, sender);
+    let pair = task.downloads[referenceNo];
+    if (pair.status === "complete") return pair.files;
+    if (pair.status === "failed") throw new Error(pair.error || "该参考号下载失败，需重新运行任务。");
+    try {
+      for (const kind of ["SN码", "发票"]) {
+        task = await getTask();
+        assertTask(task, taskId, sender);
+        const existing = task.downloads[referenceNo].files[kind];
+        const filename = existing?.filename || "pic-expert/" + taskId + "/" + sanitizePathPart(referenceNo) + "/" + kind + assets[kind].extension;
+        const downloadId = existing?.downloadId ?? await chrome.downloads.download({
+          url: assets[kind].url, filename, saveAs: false, conflictAction: "overwrite"
+        });
+        await patchTask(taskId, sender, t => { t.downloads[referenceNo].files[kind] = { downloadId, filename }; }, false);
+        await waitForDownload(downloadId, 120000, taskId);
+      }
+      task = await patchTask(taskId, sender, t => { t.downloads[referenceNo].status = "complete"; });
+      return task.downloads[referenceNo].files;
+    } catch (error) {
+      // Remove only this pair's files; retain paths when rollback fails.
+      task = await getTask();
+      if (task?.id === taskId) {
+        pair = task.downloads[referenceNo];
+        const leftovers = {};
+        for (const [kind, file] of Object.entries(pair.files)) {
+          try {
+            await chrome.downloads.cancel(file.downloadId).catch(() => {});
+            await chrome.downloads.removeFile(file.downloadId);
+          } catch { leftovers[kind] = file; }
+        }
+        const reason = error.message + (Object.keys(leftovers).length ? "；部分文件无法清理，请查看清单路径。" : "");
+        await patchTask(taskId, sender, t => {
+          t.downloads[referenceNo] = { orderNo, status: "failed", files: leftovers, error: reason };
+        }, false);
+        const failure = new Error(reason);
+        failure.files = leftovers;
+        throw failure;
+      }
+      throw error;
+    }
+  })().finally(() => pairs.delete(key));
+  pairs.set(key, promise);
+  return promise;
+};
+const finalizeTask = (message, sender) => {
+  const { taskId } = message;
+  if (endings.has(taskId)) return endings.get(taskId);
+  const promise = (async () => {
+    let task = await patchTask(taskId, sender, t => {
+      if (t.finishedAt) return;
+      t.status = "finalizing";
+      t.finalStatus = message.status === "completed" ? "completed" : "failed";
+      t.error = message.error || t.error || "";
+    }, false);
+    if (!task.finishedAt) {
+      await Promise.allSettled([...pairs.entries()].filter(([key]) => key.startsWith(taskId + "::")).map(([, promise]) => promise));
+      task = await getTask();
+      for (const [referenceNo, pair] of Object.entries(task.downloads)) {
+        if (pair.status === "pending") {
+          const leftovers = {};
+          for (const [kind, file] of Object.entries(pair.files)) {
+            try {
+              await chrome.downloads.cancel(file.downloadId).catch(() => {});
+              await chrome.downloads.removeFile(file.downloadId);
+            } catch { leftovers[kind] = file; }
+          }
+          await patchTask(taskId, sender, t => {
+            t.downloads[referenceNo] = { ...pair, status: "failed", files: leftovers, error: "任务中断。" };
+          }, false);
+        }
+      }
+      task = await patchTask(taskId, sender, t => {
+        for (const [referenceNo, pair] of Object.entries(t.downloads)) {
+          if (!t.manifestRows.some(row => row.referenceNo === referenceNo && row.orderNo === pair.orderNo)) {
+            t.manifestRows.push({ orderNo: pair.orderNo, referenceNo,
+              result: pair.status === "complete" ? "成功" : "失败", reason: pair.error || "",
+              snFile: pair.files["SN码"]?.filename || "", invoiceFile: pair.files["发票"]?.filename || "" });
+          }
+        }
+        if (t.currentRow && !t.manifestRows.some(row => row.orderNo === t.currentRow.orderNo && row.referenceNo === t.currentRow.referenceNo)) {
+          t.manifestRows.push({ ...t.currentRow, result: "失败", reason: t.error || "任务中断。", snFile: "", invoiceFile: "" });
+        }
+        delete t.currentRow;
+        t.finishedAt = new Date().toISOString();
+        for (const [key, result] of [["completed", "成功"], ["skipped", "跳过"], ["failed", "失败"]]) {
+          t[key] = t.manifestRows.filter(row => row.result === result).length;
+        }
+      }, false);
+    }
+    const settle = () => patchTask(taskId, sender, t => {
+      if (t.finalStatus) { t.status = t.finalStatus; delete t.finalStatus; }
+    }, false);
+    if (task.manifestDownloadId !== undefined) {
+      try { await waitForDownload(task.manifestDownloadId); }
+      catch (error) { await patchTask(taskId, sender, t => { t.manifestError = "清单下载失败：" + error.message; }, false); }
+      return settle();
+    }
+    const filename = "pic-expert/" + taskId + "/下载清单.csv";
+    try {
+      const downloadId = await chrome.downloads.download({
+        url: "data:text/csv;charset=utf-8," + encodeURIComponent(buildManifestCsv(task.manifestRows)),
+        filename, saveAs: false, conflictAction: "overwrite"
+      });
+      task = await patchTask(taskId, sender, t => { t.manifestDownloadId = downloadId; t.manifestFilename = filename; }, false);
+      await waitForDownload(downloadId);
+      task = await patchTask(taskId, sender, t => { t.manifestError = ""; }, false);
+    } catch (error) {
+      task = await patchTask(taskId, sender, t => { t.manifestError = "清单下载失败：" + error.message; }, false);
+    }
+    return settle();
+  })().finally(() => endings.delete(taskId));
+  endings.set(taskId, promise);
+  return promise;
+};
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     switch (message?.type) {
-      case "PIC_EXPERT_TASK_BEGIN":
-        return { ok: true, task: await startTask({ sourceUrl: sender.tab?.url || message.sourceUrl || "" }) };
-      case "PIC_EXPERT_DOWNLOAD_FILE":
-        return { ok: true, result: await downloadFile(message) };
+      case "PIC_EXPERT_TASK_BEGIN": return { ok: true, task: await startTask(message) };
+      case "PIC_EXPERT_DOWNLOAD_PAIR": return { ok: true, files: await downloadPair(message, sender) };
+      case "PIC_EXPERT_ROW_BEGIN":
+        return { ok: true, task: await patchTask(message.taskId, sender, t => { t.currentRow = message.identity; }) };
       case "PIC_EXPERT_MANIFEST_ROW":
-        return { ok: true, task: await appendManifestRow(message.taskId, message.row) };
-      case "PIC_EXPERT_PROGRESS": {
-        const current = await storageGet();
-        if (!current || current.id !== message.taskId || current.status !== "running") throw new Error("任务身份已失效。 ");
-        const patch = {};
-        for (const key of ["page", "scanned", "completed", "skipped", "failed", "stage"]) {
-          if (message[key] !== undefined) patch[key] = message[key];
-        }
-        return { ok: true, task: await updateTask(patch) };
+        return { ok: true, task: await patchTask(message.taskId, sender, t => {
+          const key = r => r.orderNo + "::" + r.referenceNo;
+          const index = t.manifestRows.findIndex(r => key(r) === key(message.row));
+          if (index < 0) t.manifestRows.push(message.row); else t.manifestRows[index] = message.row;
+          if (t.currentRow && key(t.currentRow) === key(message.row)) delete t.currentRow;
+        }) };
+      case "PIC_EXPERT_PROGRESS":
+        return { ok: true, task: await patchTask(message.taskId, sender, t => {
+          for (const key of ["page", "scanned", "completed", "skipped", "failed", "stage"]) {
+            if (message[key] !== undefined) t[key] = message[key];
+          }
+        }) };
+      case "PIC_EXPERT_TASK_END": return { ok: true, task: await finalizeTask(message, sender) };
+      case "PIC_EXPERT_TASK_STOP": {
+        const task = await getTask();
+        if (!task || !["running", "stopping", "finalizing"].includes(task.status)) return { ok: true, task };
+        await patchTask(task.id, sender, t => { t.status = "stopping"; t.finalStatus = "failed"; t.error = "用户停止任务。"; }, false);
+        await chrome.tabs.sendMessage(task.tabId, { type: "PIC_EXPERT_STOP" }, { frameId: task.frameId }).catch(() => {});
+        return { ok: true, task: await finalizeTask({ taskId: task.id, status: "failed", error: "用户停止任务。" }, sender) };
       }
-      case "PIC_EXPERT_TASK_END":
-        return { ok: true, task: await finalizeTask(message) };
-      case "PIC_EXPERT_TASK_STATE":
-        return { ok: true, task: await storageGet() };
-      default:
-        return { ok: false, error: "unknown_message" };
+      case "PIC_EXPERT_MANIFEST_RETRY": {
+        const task = await getTask();
+        if (!task || !["completed", "failed"].includes(task.status)) throw new Error("请等待任务结束。");
+        if (task.manifestDownloadId !== undefined) {
+          const [item] = await chrome.downloads.search({ id: task.manifestDownloadId });
+          if (item?.state === "complete") return { ok: true, task };
+          if (item?.state === "in_progress") { await waitForDownload(item.id); return { ok: true, task }; }
+        }
+        await patchTask(task.id, sender, t => { delete t.manifestDownloadId; }, false);
+        return { ok: true, task: await finalizeTask({ taskId: task.id }, sender) };
+      }
+      case "PIC_EXPERT_TASK_STATE": return { ok: true, task: await getTask() };
+      default: return { ok: false, error: "unknown_message" };
     }
-  })().then(sendResponse).catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
+  })().then(sendResponse).catch(error => sendResponse({ ok: false, error: error.message, files: error.files }));
   return true;
 });

@@ -11,12 +11,15 @@
     <h1>Pic Expert</h1>
     <p class="hint">先在订单页面完成登录、日期选择和查询，再开始下载当前查询结果的全部分页。</p>
     <button id="start" type="button">开始下载</button>
+    <button id="stop" type="button" hidden>停止任务</button>
+    <button id="retry" type="button" hidden>重试下载清单</button>
     <section aria-live="polite">
       <div id="status">未开始</div>
       <div id="progress"></div>
       <div id="error" role="alert"></div>
     </section>
   </main>
+  <script src="page-core.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
