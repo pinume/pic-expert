@@ -62,6 +62,7 @@ function harness(pages, detail = null) {
   };
   vm.runInNewContext(fs.readFileSync(require.resolve("../content.js"), "utf8"), context);
   return { context, doc, api: context.module.exports, messages,
+    pause: () => listener({type:"PIC_EXPERT_PAUSE"},{},()=>{}),
     schedule: (ms, fn) => scheduled.push({at:time + ms, fn}), setPage: value => { page = value; },
     open: () => { opened = true; }, probe: () => {
     let result; listener({type:"PIC_EXPERT_PROBE"}, {}, r => { result = r; }); return result;
@@ -300,4 +301,76 @@ test("ambiguous proof images prevent the whole order download", async () => {
   await h.api.run("T1");
   assert.equal(h.messages.some(m => m.type === "PIC_EXPERT_DOWNLOAD_PAIR"), false);
   assert.match(h.messages.find(m => m.type === "PIC_EXPERT_MANIFEST_ROW").row.reason, /证明材料图一.*不唯一/);
+});
+test("continuation skips known completed orders on a preserved checkpoint page", async () => {
+  const h=harness([[row("O1","R1").e,row("O2","R2").e]]);
+  const checkpoint={url:h.context.location.href,page:1,total:2,signature:"O1::R1\nO2::R2",filters:[],visitedBefore:0};
+  h.context.chrome.runtime.sendMessage=async message=>{
+    h.messages.push(message);
+    return {ok:true,done:message.type==="PIC_EXPERT_ROW_STATUS" && message.identity.orderNo==="O1"};
+  };
+  await h.api.run("T1",checkpoint);
+  assert.equal(h.messages.filter(m=>m.type==="PIC_EXPERT_MANIFEST_ROW").length,1);
+  assert.equal(h.messages.find(m=>m.type==="PIC_EXPERT_MANIFEST_ROW").row.orderNo,"O2");
+  assert.equal(h.messages.at(-1).status,"completed");
+});
+test("continuation refuses changed filters or checkpoint orders without querying", async () => {
+  const h=harness([[row("O1","R1").e]]);
+  await h.api.run("T1",{url:h.context.location.href,page:1,total:1,signature:"O1::R1",filters:[{label:"日期",value:"old"}],visitedBefore:0});
+  assert.equal(h.messages.some(m=>m.type==="PIC_EXPERT_ROW_BEGIN"),false);
+  assert.match(h.messages.at(-1).error,/当前查询与断点不同/);
+});
+test("pause stops at an order boundary before opening the next order", async () => {
+  const h=harness([[row("O1","R1").e,row("O2","R2").e]]);
+  h.context.chrome.runtime.sendMessage=async message=>{
+    h.messages.push(message);
+    if(message.type==="PIC_EXPERT_MANIFEST_ROW") h.pause();
+    return {ok:true};
+  };
+  await h.api.run("T1");
+  assert.equal(h.messages.filter(m=>m.type==="PIC_EXPERT_ROW_BEGIN").length,1);
+  assert.equal(h.messages.at(-1).type,"PIC_EXPERT_TASK_PAUSED");
+  assert.equal(h.messages.some(m=>m.type==="PIC_EXPERT_TASK_END"),false);
+});
+test("fixed detail delay is removed: immediately ready images require no timer waits", async () => {
+  const {h}=withImages(["SN码照片","发票图片"]);
+  let slept=0;
+  h.context.setTimeout=(fn,ms)=>{slept+=ms;fn();};
+  await h.api.run("T1");
+  assert.equal(slept,0);
+});
+test("transient image HTTP failures retry once without duplicating downloads", async () => {
+  const {h}=withImages(["SN码照片","发票图片"]);
+  let calls=0;
+  h.context.fetch=async()=>{
+    calls++;
+    return calls===1?{ok:false,status:503}:{ok:true,blob:async()=>new Blob([new Uint8Array([0xff,0xd8,0xff])])};
+  };
+  await h.api.run("T1");
+  assert.equal(calls,3);
+  assert.equal(h.messages.filter(m=>m.type==="PIC_EXPERT_DOWNLOAD_PAIR").length,1);
+  assert.ok(h.messages.some(m=>m.stage==="读取重试"));
+});
+test("at most two image reads run concurrently within a single order", async () => {
+  const {h}=withImages(["SN码照片","发票图片","证明材料图一","证明材料图二","证明材料图三"]);
+  let active=0, peak=0, count=0;
+  h.context.fetch=async()=>{
+    active++; peak=Math.max(peak,active); count++;
+    await new Promise(setImmediate); active--;
+    return {ok:true,blob:async()=>new Blob([new Uint8Array([0xff,0xd8,0xff])])};
+  };
+  await h.api.run("T1");
+  assert.equal(count,5); assert.equal(peak,2); assert.equal(active,0);
+});
+test("failed concurrent read waits for remaining readers and creates no downloads", async () => {
+  const {h}=withImages(["SN码照片","发票图片"]);
+  let settled=false;
+  h.context.fetch=async url=>{
+    if(url.includes("SN码")) throw new Error("invalid reader");
+    await new Promise(setImmediate); settled=true;
+    return {ok:true,blob:async()=>new Blob([new Uint8Array([0xff,0xd8,0xff])])};
+  };
+  await h.api.run("T1");
+  assert.equal(settled,true);
+  assert.equal(h.messages.some(m=>m.type==="PIC_EXPERT_DOWNLOAD_PAIR"),false);
 });

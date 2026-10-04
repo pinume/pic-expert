@@ -8,7 +8,7 @@
     getComputedStyle(e).display !== "none" && getComputedStyle(e).visibility !== "hidden";
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const all = (selector, scope = document) => [...scope.querySelectorAll(selector)].filter(visible);
-  let running = false, stopped = false;
+  let running = false, stopped = false, pauseRequested = false;
   let activeTaskId = null;
   const log = async (stage, message, level = "info") => {
     console[level === "error" ? "error" : "info"]?.("[Pic Expert] " + stage + "：" + message);
@@ -161,7 +161,17 @@
   };
   const findAssets = scope => Object.fromEntries(Object.entries(inspectAssets(scope)).map(([kind, state]) => [kind, state.url]));
   const prepareAsset = async url => {
-    const response = await fetch(url, { credentials: "same-origin", signal: AbortSignal.timeout(30000) });
+    let response;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        response = await fetch(url, { credentials: "same-origin", signal: AbortSignal.timeout(30000) });
+        if (response.ok || ![429, 500, 502, 503, 504].includes(response.status) || attempt === 1) break;
+      } catch (error) {
+        if (attempt === 1 || !["TypeError", "TimeoutError", "AbortError"].includes(error.name)) throw error;
+      }
+      await log("读取重试", "图片网络读取失败，等待 1 秒后重试一次");
+      await sleep(1000);
+    }
     if (!response.ok) throw new Error("图片读取失败：" + response.status);
     const blob = await response.blob();
     const format = FILES.imageFormat(new Uint8Array(await blob.slice(0, 16).arrayBuffer()));
@@ -213,8 +223,7 @@
     await log("打开详情", "订单身份已确认");
     let result;
     try {
-      // Wait for detail data and image rendering; DOM absence immediately after navigation is not missing data.
-      await sleep(600);
+      // Continue as soon as identified detail images are ready; no fixed per-order delay.
       const deadline = Date.now() + 8000;
       let assets, states;
       do {
@@ -231,13 +240,21 @@
           if (states[kind].ambiguous || states[kind].pending) throw new Error(kind + "图片未加载或不唯一，已停止该订单下载。");
         }
         const prepared = {};
-        for (const kind of FILES.ASSET_KINDS) {
-          if (assets[kind]) {
+        const kinds = FILES.ASSET_KINDS.filter(kind => assets[kind]);
+        let cursor = 0;
+        const readers = Array.from({ length: Math.min(2, kinds.length) }, async () => {
+          while (cursor < kinds.length) {
+            const kind = kinds[cursor++];
             await log("读取图片", kind + "：验证图片格式");
             try { prepared[kind] = await prepareAsset(assets[kind]); }
             catch (error) { throw new Error(kind + "：" + error.message); }
           }
-          else if (FILES.PROOF_KINDS.includes(kind)) await log("证明材料", kind + "为空，跳过");
+        });
+        const results = await Promise.allSettled(readers);
+        const failure = results.find(result => result.status === "rejected");
+        if (failure) throw failure.reason;
+        for (const kind of FILES.PROOF_KINDS) {
+          if (!assets[kind]) await log("证明材料", kind + "为空，跳过");
         }
         await log("配对下载", "共 " + Object.keys(prepared).length + " 张图片已读取并验证格式");
         const downloaded = await checkedSend({ type: "PIC_EXPERT_DOWNLOAD_PAIR", taskId, ...id, assets: prepared });
@@ -248,17 +265,26 @@
     }
     // Record this outcome before returning, so navigation failures retain the completed pair.
     await checkedSend({ type: "PIC_EXPERT_MANIFEST_ROW", taskId, row: result });
+    Object.defineProperty(result, "recorded", { value: true });
     try { await returnToList(detail, checkpoint); }
     catch (error) { error.rowRecorded = true; throw error; }
     return result;
   };
-  const run = async taskId => {
+  const run = async (taskId, checkpoint = null) => {
+    pauseRequested = false; stopped = false;
     activeTaskId = taskId;
-    let scanned = 0, completed = 0, skipped = 0, failed = 0, visited = 0;
+    let visited = checkpoint?.visitedBefore || 0;
     const seen = new Set();
     try {
       await log("任务启动", "开始扫描当前查询全部分页");
-      await goToPage(1);
+      if (checkpoint) {
+        const current = snapshot();
+        if (current.url !== checkpoint.url || current.total !== checkpoint.total || JSON.stringify(current.filters) !== JSON.stringify(checkpoint.filters)) {
+          throw new Error("当前查询与断点不同，请手动恢复原查询；扩展不会调整日期或点击查询。");
+        }
+        await goToPage(checkpoint.page);
+        if (signature() !== checkpoint.signature) throw new Error("断点页订单集合已变化，不能安全继续。");
+      } else await goToPage(1);
       const initial = snapshot();
       const total = initial.total;
       while (true) {
@@ -266,17 +292,20 @@
         if (!table) throw new Error("无法唯一识别订单表格。");
         const pageSignature = signature();
         const ids = table.rows.map(row => identity(row, table.columns));
+        await checkedSend({ type: "PIC_EXPERT_CHECKPOINT", taskId, checkpoint: { ...snapshot(), visitedBefore: visited } });
         for (const id of ids) {
+          if (pauseRequested) throw new Error("已在订单边界暂停。");
           if (stopped) throw new Error("用户停止任务。");
           if (signature() !== pageSignature || JSON.stringify(snapshot().filters) !== JSON.stringify(initial.filters)) throw new Error("任务运行期间查询结果或条件发生变化。");
           visited += 1;
           if (visited > total) throw new Error("扫描条数超过原查询总条数。");
           if (seen.has(key(id))) throw new Error("查询结果出现重复订单身份，已停止。");
           seen.add(key(id));
+          const status = await checkedSend({ type: "PIC_EXPERT_ROW_STATUS", taskId, identity: id });
+          if (status.done) continue;
           const fresh = currentTable();
           const matches = fresh?.rows.filter(row => key(identity(row, fresh.columns)) === key(id)) || [];
           if (matches.length !== 1) throw new Error("无法唯一定位原订单行。");
-          scanned += 1;
           await checkedSend({ type: "PIC_EXPERT_ROW_BEGIN", taskId, identity: id });
           let result;
           try { result = await processRow(matches[0], fresh, taskId); }
@@ -285,33 +314,36 @@
               row: { ...id, result: "失败", reason: error.message, ...FILES.manifestFiles() } });
             throw error;
           }
-          if (result.result === "成功") completed += 1;
-          else if (result.result === "跳过") skipped += 1;
-          else failed += 1;
-          // Skipped rows never opened details, and therefore need their manifest entry here.
-          await checkedSend({ type: "PIC_EXPERT_MANIFEST_ROW", taskId, row: result });
-          await checkedSend({ type: "PIC_EXPERT_PROGRESS", taskId, page: pager().page, scanned, completed, skipped, failed });
+          // Detail outcomes are already persisted before returning; list-only skips need one write.
+          if (!result.recorded) await checkedSend({ type: "PIC_EXPERT_MANIFEST_ROW", taskId, row: result });
         }
+        if (pauseRequested) throw new Error("已在订单边界暂停。");
         if (!await pageStep(1)) break;
       }
       if (visited !== total) throw new Error("扫描条数与查询总条数不一致，已停止。");
       await checkedSend({ type: "PIC_EXPERT_TASK_END", taskId, status: "completed" });
     } catch (error) {
+      if (pauseRequested) {
+        await log("暂停任务", error.message);
+        await chrome.runtime.sendMessage({type:"PIC_EXPERT_TASK_PAUSED",taskId,error:stopped ? error.message : ""}).catch(() => {});
+        return;
+      }
       await log("任务中断", error.message, "error");
       await chrome.runtime.sendMessage({ type: "PIC_EXPERT_TASK_END", taskId, status: "failed", error: error.message }).catch(() => {});
     } finally { running = false; activeTaskId = null; }
   };
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "PIC_EXPERT_PROBE") {
-      sendResponse({ ok: true, ready: Boolean(currentTable()) }); return false;
+      sendResponse({ ok: true, ready: Boolean(currentTable()), running }); return false;
     }
     if (message?.type === "PIC_EXPERT_STOP") { stopped = true; sendResponse({ ok: true }); return false; }
+    if (message?.type === "PIC_EXPERT_PAUSE") { pauseRequested = true; sendResponse({ ok: true, running }); return false; }
     if (message?.type !== "PIC_EXPERT_START") return false;
     if (running) { sendResponse({ ok: false, error: "当前页面已有任务。" }); return false; }
-    running = true; stopped = false;
+    running = true; stopped = false; pauseRequested = false;
     // Acknowledge immediately: closing the popup must not cancel an hours-long run.
     sendResponse({ ok: true });
-    void run(message.taskId);
+    void run(message.taskId, message.checkpoint || null);
     return false;
   });
   // Exposed only by Node's test harness; not installed on the page's MAIN world.

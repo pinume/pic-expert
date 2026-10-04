@@ -4,22 +4,30 @@ const vm = require("node:vm");
 const fs = require("node:fs");
 const path = require("node:path");
 const core = require("../core.js");
+const { MemoryStore } = require("./memory-store.cjs");
 const sender = { tab: { id: 7 }, frameId: 4 };
 const assets = { "SN码": { extension: ".jpg", url: "data:image/jpeg;base64,/9j/" },
   "发票": { extension: ".png", url: "data:image/png;base64,iVBORw==" } };
 function harness(options = {}, initial = null) {
   let listener, stored = initial;
-  const calls = [], removed = [], items = new Map();
+  const store = options.store || new MemoryStore(initial);
+  const calls = [], removed = [], items = options.items || new Map();
+  const handlers = new Set();
+  const notify = (id, state) => {
+    items.get(id).state = state;
+    for (const handler of handlers) handler({id,state:{current:state}});
+  };
   const chrome = {
     storage: { local: {
       get: async () => ({ picExpertTask: structuredClone(stored) }),
       set: async value => { stored = structuredClone(value.picExpertTask); }
     } },
     runtime: { onMessage: { addListener: f => { listener = f; } } },
-    tabs: { sendMessage: async () => ({ ok: true }) },
+    tabs: { sendMessage: async () => ({ ok: true, running: Boolean(options.livePage) }) },
     downloads: {
+      onChanged: {addListener:handler=>handlers.add(handler),removeListener:handler=>handlers.delete(handler)},
       download: async args => {
-        const id = calls.length + 1;
+        const id = Math.max(0, ...items.keys()) + 1;
         calls.push(args);
         const failed = (options.failInvoice && args.filename.includes("发票")) ||
           (options.failProof && args.filename.includes(options.failProof)) ||
@@ -28,7 +36,7 @@ function harness(options = {}, initial = null) {
         return id;
       },
       search: async ({ id }) => items.has(id) ? [items.get(id)] : [],
-      cancel: async id => { if (items.has(id)) items.get(id).state = "interrupted"; },
+      cancel: async id => { if (items.has(id)) notify(id,"interrupted"); },
       removeFile: async id => {
         if ((options.failRemove && id === 1) || options.failRemoveId === id) throw new Error("file_locked");
         removed.push(id);
@@ -36,12 +44,12 @@ function harness(options = {}, initial = null) {
     }
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../background.js"), "utf8"), {
-    chrome, importScripts() {}, PIC_EXPERT_CORE: core, setTimeout, Date, Map
+    chrome, importScripts() {}, PIC_EXPERT_CORE: core, PIC_EXPERT_STORE: store, setTimeout, clearTimeout, Date, Map
   });
   const send = (message, source = sender) => new Promise(resolve => listener(message, source, resolve));
   const begin = () => send({ type: "PIC_EXPERT_TASK_BEGIN", tabId: 7, frameId: 4, sourceUrl: "https://example.test" }, {});
   const pair = taskId => send({ type: "PIC_EXPERT_DOWNLOAD_PAIR", taskId, orderNo: "O1", referenceNo: "R1", assets });
-  return { send, begin, pair, calls, removed, items, task: () => structuredClone(stored) };
+  return { send, begin, pair, calls, removed, items, store, notify, handlers, task: () => store.snapshot() };
 }
 test("concurrent starts create one task", async () => {
   const h = harness();
@@ -240,4 +248,130 @@ test("missing required pair or invalid optional format creates no downloads", as
     assert.equal((await h.send({type:"PIC_EXPERT_DOWNLOAD_PAIR",taskId:task.id,orderNo:"O1",referenceNo:"R1",assets:value})).ok, false);
   }
   assert.equal(h.calls.length, 0);
+});
+const checkpoint = {url:"https://portal.test/app#/auditOfTrade2026",page:1,total:2,signature:"O1::R1\nO2::R2",filters:[],visitedBefore:0};
+const saveCheckpoint = (h,id) => h.send({type:"PIC_EXPERT_CHECKPOINT",taskId:id,checkpoint});
+test("graceful pause preserves the task directory and completed files without exporting partial CSV", async () => {
+  const h=harness({livePage:true}),{task}=await h.begin();
+  await saveCheckpoint(h,task.id); await h.pair(task.id);
+  await h.send({type:"PIC_EXPERT_MANIFEST_ROW",taskId:task.id,row:{orderNo:"O1",referenceNo:"R1",result:"成功",reason:""}});
+  await h.send({type:"PIC_EXPERT_TASK_PAUSE"},{});
+  assert.equal(h.task().status,"pausing");
+  await h.send({type:"PIC_EXPERT_TASK_PAUSED",taskId:task.id});
+  assert.equal(h.task().status,"paused");
+  assert.equal(h.calls.length,2);
+  const resumed=await h.send({type:"PIC_EXPERT_TASK_RESUME",tabId:7,frameId:4},{});
+  assert.equal(resumed.task.id,task.id);
+  assert.equal(resumed.task.completed,1);
+  assert.equal((await h.send({type:"PIC_EXPERT_ROW_STATUS",taskId:task.id,identity:{orderNo:"O1",referenceNo:"R1"}})).done,true);
+});
+test("worker restart preserves completed rows and can rebind continuation to a new frame", async () => {
+  const h=harness(),{task}=await h.begin(); await saveCheckpoint(h,task.id); await h.pair(task.id);
+  await h.send({type:"PIC_EXPERT_MANIFEST_ROW",taskId:task.id,row:{orderNo:"O1",referenceNo:"R1",result:"成功",reason:""}});
+  await h.send({type:"PIC_EXPERT_TASK_PAUSE"},{});
+  const restarted=harness({store:h.store,items:h.items});
+  assert.ok((await restarted.send({type:"PIC_EXPERT_TASK_RESUME",tabId:7,frameId:9},{})).ok);
+  assert.equal((await restarted.pair(task.id)).ok,false);
+  const response=await restarted.send({type:"PIC_EXPERT_ROW_STATUS",taskId:task.id,identity:{orderNo:"O1",referenceNo:"R1"}},{tab:{id:7},frameId:9});
+  assert.equal(response.done,true);
+  assert.equal(restarted.calls.length,0);
+});
+test("missing completed files are redownloaded rather than blindly skipped", async () => {
+  const h=harness(),{task}=await h.begin(); await saveCheckpoint(h,task.id); await h.pair(task.id);
+  await h.send({type:"PIC_EXPERT_MANIFEST_ROW",taskId:task.id,row:{orderNo:"O1",referenceNo:"R1",result:"成功",reason:""}});
+  h.items.get(1).exists=false;
+  assert.equal((await h.send({type:"PIC_EXPERT_ROW_STATUS",taskId:task.id,identity:{orderNo:"O1",referenceNo:"R1"}})).done,false);
+  assert.ok((await h.pair(task.id)).ok);
+  assert.equal(h.calls.length,4);
+});
+test("failed pair is only retried after explicit continuation, never by duplicate messages", async () => {
+  const options={failInvoice:true}, h=harness(options),{task}=await h.begin(); await saveCheckpoint(h,task.id);
+  assert.equal((await h.pair(task.id)).ok,false);
+  assert.equal((await h.pair(task.id)).ok,false);
+  assert.equal(h.calls.length,2);
+  await h.send({type:"PIC_EXPERT_TASK_END",taskId:task.id,status:"failed"});
+  await h.send({type:"PIC_EXPERT_TASK_RESUME",tabId:7,frameId:4},{});
+  options.failInvoice=false;
+  assert.ok((await h.pair(task.id)).ok);
+  await h.send({type:"PIC_EXPERT_MANIFEST_ROW",taskId:task.id,row:{orderNo:"O1",referenceNo:"R1",result:"成功",reason:""}});
+  assert.equal(h.task().scanned,1);
+  assert.equal(h.task().completed,1);
+  assert.equal(h.task().failed,0);
+});
+test("force pause cleans an in-flight pair and retains a resumable checkpoint", async () => {
+  const options={livePage:true,holdPair:true},h=harness(options),{task}=await h.begin();
+  await saveCheckpoint(h,task.id); const download=h.pair(task.id);
+  while(!h.task().downloads.R1?.files["SN码"]) await new Promise(setImmediate);
+  await h.send({type:"PIC_EXPERT_TASK_PAUSE"},{});
+  assert.equal(h.task().status,"pausing");
+  await h.send({type:"PIC_EXPERT_TASK_PAUSE"},{});
+  assert.equal((await download).ok,false);
+  assert.equal(h.task().status,"paused");
+  assert.deepEqual(h.task().downloads.R1.files,{});
+  assert.equal(h.calls.some(c=>c.filename.endsWith(".csv")),false);
+  assert.ok(h.task().checkpoint);
+});
+test("large-task log updates write bounded metadata and popup responses contain no order arrays", async () => {
+  const rows=Array.from({length:20000},(_,i)=>({orderNo:"O"+i,referenceNo:"R"+i,result:"成功"}));
+  const h=harness({}, {id:"T1",status:"running",tabId:7,frameId:4,manifestRows:rows,downloads:{}});
+  await h.send({type:"PIC_EXPERT_LOG",taskId:"T1",stage:"测试",message:"small update"});
+  const write=h.store.writes.at(-1);
+  assert.equal(write.rows,0); assert.equal(write.pairs,0); assert.ok(write.metadataBytes<1000);
+  const current=(await h.send({type:"PIC_EXPERT_TASK_STATE"},{})).task;
+  assert.equal(current.manifestRows,undefined); assert.equal(current.downloads,undefined);
+  assert.equal(current.completed,20000);
+});
+test("full-log export includes early entries beyond the popup's 500-row window", async () => {
+  const h=harness(),{task}=await h.begin();
+  await h.store.save(await h.store.getTask(),{logs:Array.from({length:520},(_,i)=>({time:"2026-10-05",level:"info",stage:"test",message:"entry-"+i}))});
+  await h.send({type:"PIC_EXPERT_LOG_EXPORT"},{});
+  const text=decodeURIComponent(h.calls[0].url);
+  assert.match(text,/entry-0\n/); assert.match(text,/entry-519/);
+  assert.ok((await h.store.logs(task.id,Infinity)).length>500);
+});
+test("checkpoint page offsets are preserved on resume and advance only after confirmed paging", async () => {
+  const h=harness(),{task}=await h.begin();
+  await saveCheckpoint(h,task.id);
+  await h.send({type:"PIC_EXPERT_CHECKPOINT",taskId:task.id,checkpoint:{...checkpoint,visitedBefore:1}});
+  assert.equal(h.task().checkpoint.visitedBefore,0);
+  await h.send({type:"PIC_EXPERT_CHECKPOINT",taskId:task.id,checkpoint:{...checkpoint,page:2,visitedBefore:20}});
+  assert.equal(h.task().checkpoint.visitedBefore,20);
+});
+test("full-log export splits large logs into bounded segments with no omissions", async () => {
+  const h=harness(),{task}=await h.begin();
+  await h.store.save(await h.store.getTask(),{logs:Array.from({length:5100},(_,i)=>({time:"2026-10-05",level:"info",stage:"test",message:"row-"+i}))});
+  await h.send({type:"PIC_EXPERT_LOG_EXPORT"},{});
+  assert.equal(h.calls.length,2);
+  const text=h.calls.map(call=>decodeURIComponent(call.url)).join("\n");
+  assert.equal((text.match(/row-\d+/g)||[]).length,5100);
+  assert.match(h.calls[0].filename,/运行日志-001.txt$/);
+  assert.match(h.calls[1].filename,/运行日志-002.txt$/);
+});
+test("native completion events release waiters and listeners are removed afterward", async () => {
+  const h=harness({holdPair:true}),{task}=await h.begin(),download=h.pair(task.id);
+  while(!h.task().downloads.R1?.files["SN码"]) await new Promise(setImmediate);
+  h.notify(1,"complete");
+  while(!h.task().downloads.R1?.files["发票"]) await new Promise(setImmediate);
+  h.notify(2,"complete");
+  assert.ok((await download).ok);
+  assert.equal(h.handlers.size,0);
+});
+test("concurrent manifest retries start only one replacement CSV download", async () => {
+  const options={failManifest:true},h=harness(options),{task}=await h.begin();
+  await h.send({type:"PIC_EXPERT_TASK_END",taskId:task.id,status:"completed"});
+  options.failManifest=false;
+  await Promise.all([h.send({type:"PIC_EXPERT_MANIFEST_RETRY"},{}),h.send({type:"PIC_EXPERT_MANIFEST_RETRY"},{})]);
+  assert.equal(h.calls.length,2);
+  assert.equal(h.task().manifestError,"");
+});
+test("force-pause cleanup blocks new tasks until pending downloads settle", async () => {
+  const h=harness({livePage:true,holdPair:true}),{task}=await h.begin();
+  await saveCheckpoint(h,task.id); const download=h.pair(task.id);
+  while(!h.task().downloads.R1?.files["SN码"]) await new Promise(setImmediate);
+  await h.send({type:"PIC_EXPERT_TASK_PAUSE"},{});
+  const pause=h.send({type:"PIC_EXPERT_TASK_PAUSE"},{});
+  while(!h.task().forcePause) await new Promise(setImmediate);
+  assert.equal((await h.begin()).ok,false);
+  await pause; await download;
+  assert.equal(h.task().status,"paused");
 });

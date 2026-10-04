@@ -12,6 +12,8 @@
     <p class="hint">先在订单页面完成登录、日期选择和查询，再开始下载当前查询结果的全部分页。</p>
     <button id="start" type="button">开始下载</button>
     <button id="stop" type="button" hidden>停止任务</button>
+    <button id="pause" type="button" hidden>暂停任务</button>
+    <button id="resume" type="button" hidden>继续上次任务</button>
     <button id="retry" type="button" hidden>重试下载清单</button>
     <section aria-live="polite">
       <div id="status">未开始</div>
@@ -22,6 +24,7 @@
       <summary>运行日志（最近 500 条）</summary>
       <textarea id="logs" rows="12" readonly aria-label="运行日志"></textarea>
       <button id="copy-logs" type="button" disabled>复制日志</button>
+      <button id="export-logs" type="button" disabled>导出完整日志</button>
       <span id="copy-status" role="status"></span>
     </details>
   </main>
