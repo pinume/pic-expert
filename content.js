@@ -100,7 +100,7 @@
     const jump = all(".el-pagination__jump input", before.scope);
     if (numbers.length === 1 && !disabled(numbers[0])) numbers[0].click();
     else if (jump.length === 1 && !disabled(jump[0])) {
-      setInput(jump[0], String(target));
+      setPageInput(jump[0], String(target));
       jump[0].dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
     } else {
       while (pager().page !== target) {
@@ -115,143 +115,51 @@
     filters: all(".search-item").map(item => {
       const input = item.querySelector("input");
       return input ? { label: clean(item.querySelector("label")?.textContent || item.firstChild?.textContent),
-        value: input.value, date: input.classList.contains("deal-date") || input.classList.contains("clear-date-merge-detail"),
-        readonly: input.readOnly } : null;
+        value: input.value } : null;
     }).filter(Boolean)
   });
-  const setInput = (input, value) => {
+  const setPageInput = (input, value) => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, value);
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
   };
-  const openDateCalendar = async (input, label) => {
-    // The route may render the input before laydate binds its focus/click handler.
-    let nextAttempt = 0, attempts = 0;
-    await log("日期控件", "等待初始化并打开：" + label);
-    const findCalendar = () => {
-      const calendars = all(".layui-laydate");
-      if (calendars.length > 1) throw new Error("日期控件不唯一，已停止。");
-      return calendars[0] || null;
-    };
-    const calendar = await wait(() => {
-      const existing = findCalendar();
-      if (existing) return existing;
-      if (Date.now() >= nextAttempt) {
-        attempts += 1;
-        nextAttempt = Date.now() + 1000;
-        input.blur?.();
-        input.focus?.();
-        // Focus may already open the calendar. A following click can toggle it shut.
-        let opened = findCalendar();
-        if (opened) return opened;
-        input.dispatchEvent(new Event("focus"));
-        opened = findCalendar();
-        if (opened) return opened;
-        input.click();
-        return findCalendar();
-      }
-      return false;
-    }, "原日期控件未打开（已重试聚焦和点击，请查看运行日志）。").catch(async error => {
-      await log("日期控件", error.message + " 尝试 " + attempts + " 次；日历节点 " +
-        document.querySelectorAll(".layui-laydate").length + "，可见 " + all(".layui-laydate").length +
-        "；输入连接 " + input.isConnected + "，禁用 " + input.disabled + "，只读 " + input.readOnly, "error");
-      throw error;
-    });
-    await log("日期控件", "已打开，尝试 " + attempts + " 次");
-    return calendar;
-  };
-  const selectCalendarDate = async date => {
-    const [year, month] = date.split("-").map(Number), target = year * 12 + month;
-    for (let attempt = 0; attempt < 25; attempt += 1) {
-      const calendars = all(".layui-laydate");
-      if (calendars.length !== 1) throw new Error("日期控件消失或不唯一。");
-      const calendar = calendars[0];
-      const cells = all("td[lay-ymd]", calendar).filter(e => e.getAttribute("lay-ymd") === date &&
-        !["laydate-disabled", "laydate-day-prev", "laydate-day-next"].some(cls => e.classList.contains(cls)));
-      if (cells.length === 1) { cells[0].click(); await sleep(200); return; }
-      if (cells.length > 1) throw new Error("目标日期不唯一。");
-      const panels = all(".layui-laydate-main", calendar).map(panel => {
-        const match = clean(panel.querySelector(".laydate-set-ym")?.textContent).match(/(\d{4})\s*年\s*(\d{1,2})\s*月/);
-        return match ? { panel, month: Number(match[1]) * 12 + Number(match[2]) } : null;
-      }).filter(Boolean);
-      if (!panels.length || attempt === 24) throw new Error("原日期范围无法恢复。");
-      const before = panels.map(p => p.month).join(",");
-      const previous = target < panels[0].month;
-      if (!previous && target <= panels.at(-1).month) throw new Error("原日期不可选，已停止。");
-      const panel = previous ? panels[0].panel : panels.at(-1).panel;
-      const arrows = all(previous ? ".laydate-prev-m" : ".laydate-next-m", panel).filter(e => !e.classList.contains("laydate-disabled"));
-      if (arrows.length !== 1) throw new Error("日期月份切换入口不唯一。");
-      arrows[0].click();
-      await wait(() => all(".layui-laydate-main", calendar).map(p => {
-        const match = clean(p.querySelector(".laydate-set-ym")?.textContent).match(/(\d{4})\s*年\s*(\d{1,2})\s*月/);
-        return match ? Number(match[1]) * 12 + Number(match[2]) : "";
-      }).join(",") !== before, "日期月份没有更新。");
-    }
-  };
   const restoreList = async checkpoint => {
-    await log("返回列表", "恢复原查询路由，目标页 " + checkpoint.page);
+    await log("返回列表", "返回原列表；仅核对已有查询，不修改条件或执行查询");
     const destination = new URL(checkpoint.url);
     if (destination.origin !== location.origin || destination.pathname !== location.pathname ||
-      destination.hash.split("?")[0] !== "#/auditOfTrade2026") throw new Error("无法安全恢复原查询页面。");
-    // Portal return buttons route to other modules. Restore only the recorded frame route.
-    location.hash = destination.hash;
-    await wait(() => all("input.deal-date").length === 1, "未能返回原采集列表。");
-    const items = all(".search-item").filter(item => item.querySelector("input"));
-    if (items.length !== checkpoint.filters.length) throw new Error("查询条件结构发生变化。");
-    for (let i = 0; i < items.length; i += 1) {
-      const input = items[i].querySelector("input"), saved = checkpoint.filters[i];
-      const label = clean(items[i].querySelector("label")?.textContent || items[i].firstChild?.textContent);
-      if (label !== saved.label) throw new Error("查询字段顺序发生变化。");
-      if (saved.date && saved.value) {
-        await openDateCalendar(input, label);
-        for (const date of CORE.dateRange(saved.value)) {
-          await selectCalendarDate(date);
-        }
-        const calendars = all(".layui-laydate");
-        if (calendars.length !== 1) throw new Error("日期控件消失或不唯一。");
-        const calendar = calendars[0];
-        const confirm = all(".laydate-btns-confirm", calendar);
-        if (confirm.length !== 1 || confirm[0].classList.contains("laydate-disabled")) throw new Error("日期确认控件不可用或不唯一。");
-        confirm[0].click();
-        await wait(() => input.value === saved.value, "日期控件确认后未恢复原日期范围。");
-        await log("日期控件", "已选择并确认原日期范围");
-      } else if (saved.readonly && input.value !== saved.value) {
-        input.click();
-        for (const part of saved.value.split(/\s*\/\s*/)) {
-          const choice = await wait(() => {
-            const matches = all(".el-cascader-node__label").filter(e => clean(e.textContent) === part);
-            return matches.length === 1 && matches[0];
-          }, "无法恢复原订单状态。");
-          choice.click();
-        }
-      } else setInput(input, saved.value);
-      if (input.value !== saved.value) throw new Error("恢复后的查询条件与原查询不同。");
+      destination.hash.split("?")[0] !== "#/auditOfTrade2026") throw new Error("无法安全返回原查询页面。");
+    if (location.hash !== destination.hash) location.hash = destination.hash;
+    await wait(() => !loading() && currentTable() && all(".group-manager-container-float2.trade-in").length === 0,
+      "返回后原查询结果未保留，请手动恢复原列表后重新开始；扩展不会修改日期或执行查询。");
+    const restored = snapshot();
+    if (JSON.stringify(restored.filters) !== JSON.stringify(checkpoint.filters) || restored.total !== checkpoint.total) {
+      throw new Error("返回后原查询条件或总条数未保留，已停止；扩展不会修改日期或执行查询。");
     }
-    const query = all("button").filter(e => clean(e.textContent) === "查询");
-    if (query.length !== 1) throw new Error("查询入口不唯一。");
-    await log("恢复查询", "条件已核对，执行原查询");
-    query[0].click();
-    await wait(() => !loading() && currentTable() && pager().total === checkpoint.total, "原查询结果没有恢复。");
     await goToPage(checkpoint.page);
-    if (pager().page !== checkpoint.page || signature() !== checkpoint.signature) throw new Error("恢复后的订单集合与原查询不同，已停止。");
-    await log("返回列表", "原页码和订单集合已确认");
+    if (signature() !== checkpoint.signature) throw new Error("返回后的订单集合与原查询不同，已停止。");
+    await log("返回列表", "原查询条件、页码和订单集合已确认");
   };
-  const findAssets = scope => {
+  const inspectAssets = scope => {
     const result = {};
-    for (const kind of ["SN码", "发票"]) {
+    for (const kind of FILES.ASSET_KINDS) {
       const containers = all(".image-container1", scope).filter(e => CORE.assetKind(e.querySelector("p")?.textContent) === kind);
-      const urls = containers.flatMap(e => all("img.el-image__inner", e).filter(i => i.complete && i.naturalWidth > 0).map(i => i.currentSrc || i.src));
+      const images = containers.flatMap(e => all("img.el-image__inner", e));
+      let pending = containers.some(e => all(".el-image__loading", e).length > 0);
       // Generic dialogs use local field containers, never climb into sibling image groups.
       if (!containers.length) {
         for (const field of all(".el-form-item,.ant-form-item", scope)) {
           if (CORE.assetKind(field.querySelector("label")?.textContent) !== kind) continue;
-          urls.push(...all("img", field).filter(i => i.complete && i.naturalWidth > 0).map(i => i.currentSrc || i.src));
+          images.push(...all("img", field));
+          pending ||= all(".el-image__loading", field).length > 0;
         }
       }
-      result[kind] = CORE.chooseUnique(urls);
+      const urls = [...new Set(images.filter(i => i.complete && i.naturalWidth > 0).map(i => i.currentSrc || i.src).filter(Boolean))];
+      pending ||= images.some(i => !i.complete || i.naturalWidth <= 0);
+      result[kind] = { url: CORE.chooseUnique(urls), pending, ambiguous: urls.length > 1 };
     }
     return result;
   };
+  const findAssets = scope => Object.fromEntries(Object.entries(inspectAssets(scope)).map(([kind, state]) => [kind, state.url]));
   const prepareAsset = async url => {
     const response = await fetch(url, { credentials: "same-origin", signal: AbortSignal.timeout(30000) });
     if (!response.ok) throw new Error("图片读取失败：" + response.status);
@@ -285,7 +193,7 @@
   };
   const processRow = async (row, table, taskId) => {
     const id = identity(row, table.columns);
-    const empty = { ...id, snFile: "", invoiceFile: "" };
+    const empty = { ...id, ...FILES.manifestFiles() };
     if (!id.orderNo || !id.referenceNo) return { ...empty, result: "跳过", reason: "订单号或参考号缺失" };
     const clones = all(".el-table__fixed-body-wrapper", table.root).flatMap(body => all("tbody tr", body))
       .filter(other => key(identity(other, table.columns)) === key(id));
@@ -308,24 +216,35 @@
       // Wait for detail data and image rendering; DOM absence immediately after navigation is not missing data.
       await sleep(600);
       const deadline = Date.now() + 8000;
-      let assets;
+      let assets, states;
       do {
-        assets = findAssets(detail.element);
-        if (assets["SN码"] && assets["发票"]) break;
+        states = inspectAssets(detail.element);
+        assets = Object.fromEntries(Object.entries(states).map(([kind, state]) => [kind, state.url]));
+        if (FILES.REQUIRED_KINDS.every(kind => assets[kind]) && FILES.PROOF_KINDS.every(kind => !states[kind].pending)) break;
         if (stopped) throw new Error("用户停止任务。");
         await sleep(250);
       } while (Date.now() < deadline);
       if (!assets["SN码"] || !assets["发票"]) {
         result = { ...empty, result: "跳过", reason: "SN码或发票图片缺失、未加载或不唯一" };
       } else {
-        const prepared = { "SN码": await prepareAsset(assets["SN码"]), "发票": await prepareAsset(assets["发票"]) };
-        await log("配对下载", "两张图片已读取并验证格式");
+        for (const kind of FILES.PROOF_KINDS) {
+          if (states[kind].ambiguous || states[kind].pending) throw new Error(kind + "图片未加载或不唯一，已停止该订单下载。");
+        }
+        const prepared = {};
+        for (const kind of FILES.ASSET_KINDS) {
+          if (assets[kind]) {
+            await log("读取图片", kind + "：验证图片格式");
+            try { prepared[kind] = await prepareAsset(assets[kind]); }
+            catch (error) { throw new Error(kind + "：" + error.message); }
+          }
+          else if (FILES.PROOF_KINDS.includes(kind)) await log("证明材料", kind + "为空，跳过");
+        }
+        await log("配对下载", "共 " + Object.keys(prepared).length + " 张图片已读取并验证格式");
         const downloaded = await checkedSend({ type: "PIC_EXPERT_DOWNLOAD_PAIR", taskId, ...id, assets: prepared });
-        result = { ...id, result: "成功", reason: "", snFile: downloaded.files["SN码"].filename, invoiceFile: downloaded.files["发票"].filename };
+        result = { ...id, result: "成功", reason: "", ...FILES.manifestFiles(downloaded.files) };
       }
     } catch (error) {
-      result = { ...empty, result: "失败", reason: error.message,
-        snFile: error.files?.["SN码"]?.filename || "", invoiceFile: error.files?.["发票"]?.filename || "" };
+      result = { ...empty, result: "失败", reason: error.message, ...FILES.manifestFiles(error.files) };
     }
     // Record this outcome before returning, so navigation failures retain the completed pair.
     await checkedSend({ type: "PIC_EXPERT_MANIFEST_ROW", taskId, row: result });
@@ -363,7 +282,7 @@
           try { result = await processRow(matches[0], fresh, taskId); }
           catch (error) {
             if (!error.rowRecorded) await checkedSend({ type: "PIC_EXPERT_MANIFEST_ROW", taskId,
-              row: { ...id, result: "失败", reason: error.message, snFile: "", invoiceFile: "" } });
+              row: { ...id, result: "失败", reason: error.message, ...FILES.manifestFiles() } });
             throw error;
           }
           if (result.result === "成功") completed += 1;
@@ -396,5 +315,5 @@
     return false;
   });
   // Exposed only by Node's test harness; not installed on the page's MAIN world.
-  if (typeof module !== "undefined" && module.exports) module.exports = { currentTable, findAssets, detailScope, run, processRow, restoreList, goToPage, openDateCalendar, selectCalendarDate };
+  if (typeof module !== "undefined" && module.exports) module.exports = { currentTable, findAssets, detailScope, run, processRow, restoreList, goToPage };
 })();

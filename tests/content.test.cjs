@@ -90,7 +90,7 @@ test("all query pages are scanned and material modification rows skipped", async
   assert.ok(rows.every(m => m.row.result === "跳过" && m.row.reason === "材料修改"));
   assert.equal(h.messages.at(-1).status, "completed");
 });
-test("portal labels select real previews and exclude placeholder/proof images", () => {
+test("portal labels select real previews including proof images", () => {
   const real = new Element();
   Object.assign(real, {complete:true, naturalWidth:100, currentSrc:"https://portal.test/image1"});
   const invoice = new Element();
@@ -101,6 +101,7 @@ test("portal labels select real previews and exclude placeholder/proof images", 
   const h = harness([[row("O1","R1").e]]);
   assert.equal(h.api.findAssets(scope)["SN码"], real.currentSrc);
   assert.equal(h.api.findAssets(scope)["发票"], invoice.currentSrc);
+  assert.equal(h.api.findAssets(scope)["证明材料图一"], real.currentSrc);
 });
 test("failure to return to a confirmed list stops before the next order", async () => {
   const one = row("O1", "R1", false), two = row("O2", "R2", false);
@@ -113,48 +114,7 @@ test("failure to return to a confirmed list stops before the next order", async 
   assert.equal(first, 1);
   assert.equal(second, 0);
   assert.equal(h.messages.at(-1).status, "failed");
-  assert.match(h.messages.at(-1).error, /恢复原查询页面/);
-});
-
-test("standalone return reselects the original dates and verifies the same order set", async () => {
-  const h = harness([[row("O1", "R1").e]]);
-  class Input extends Element {
-    get value() { return this._value || ""; }
-    set value(v) { this._value = v; }
-    dispatchEvent() {}
-  }
-  const input = new Input();
-  input.classList = { contains: cls => cls === "deal-date" };
-  const field = new Element("", { "input": [input], "label": [new Element("交易日期")] });
-  const selected = [];
-  const cell = date => {
-    const e = new Element();
-    e.getAttribute = () => date;
-    e.onClick = () => selected.push(date);
-    return e;
-  };
-  const confirm = new Element("确定");
-  confirm.onClick = () => { input.value = "2026/10/01 ~ 2026/10/04"; };
-  const calendar = new Element("", { "td[lay-ymd]": [cell("2026-10-1"), cell("2026-10-4")],
-    ".laydate-btns-confirm": [confirm] });
-  let queried = 0, opened = false;
-  input.onClick = () => { opened = true; };
-  const query = new Element("查询");
-  query.onClick = () => { queried++; };
-  h.doc.selectors[".search-item"] = [field];
-  h.doc.selectors["input.deal-date"] = [input];
-  h.doc.selectors[".layui-laydate"] = () => opened ? [calendar] : [];
-  h.doc.selectors["button"] = [query];
-  h.context.HTMLInputElement = Input;
-  h.context.Event = class {};
-  h.context.location.href = "https://portal.test/app#/auditOfTrade2026";
-  const checkpoint = { url: h.context.location.href, page: 1, total: 1, signature: "O1::R1",
-    filters: [{label:"交易日期",value:"2026/10/01 ~ 2026/10/04",date:true,readonly:false}] };
-  await h.api.restoreList(checkpoint);
-  assert.deepEqual(selected, ["2026-10-1", "2026-10-4"]);
-  assert.equal(input.value, checkpoint.filters[0].value);
-  assert.equal(queried, 1);
-  await assert.rejects(h.api.restoreList({...checkpoint, signature:"O2::R2"}), /订单集合与原查询不同/);
+  assert.match(h.messages.at(-1).error, /返回原查询页面/);
 });
 
 test("pager changing before delayed rows does not skip the next page", async () => {
@@ -195,7 +155,7 @@ test("fixed-column detail control is matched by both identities", async () => {
   clone.control.onClick = () => { clicks++; h.open(); };
   await h.api.run("T1");
   assert.equal(clicks, 1);
-  assert.match(h.messages.at(-1).error, /恢复原查询页面/);
+  assert.match(h.messages.at(-1).error, /返回原查询页面/);
 });
 test("ambiguous visible fixed-column controls fail safely", async () => {
   const main = row("O1","R1",false);
@@ -255,28 +215,6 @@ test("without jump controls page restoration safely supports forward and backwar
   await h.api.goToPage(1);
   assert.equal(h.api.currentTable().rows[0].textContent.startsWith("O1"), true);
 });
-test("date calendar opens via focus after its handler initializes late", async () => {
-  const h = harness([[row("O1","R1").e]]), input = new Element(), calendar = new Element();
-  let bound = false, opened = false, focuses = 0;
-  input.focus = () => { focuses++; if (bound) opened = true; };
-  input.blur = () => {};
-  h.schedule(1800, () => { bound = true; });
-  h.doc.selectors[".layui-laydate"] = () => opened ? [calendar] : [];
-  assert.equal(await h.api.openDateCalendar(input, "交易日期"), calendar);
-  assert.ok(focuses >= 3);
-});
-test("date calendar times out safely and does not query when unavailable", async () => {
-  const h = harness([[row("O1","R1").e]]), input = new Element();
-  let clicks = 0;
-  input.onClick = () => { clicks++; };
-  await assert.rejects(h.api.openDateCalendar(input, "交易日期"), /原日期控件未打开/);
-  assert.equal(clicks, 15);
-});
-test("multiple visible date calendars fail without choosing one", async () => {
-  const h = harness([[row("O1","R1").e]]);
-  h.doc.selectors[".layui-laydate"] = [new Element(),new Element()];
-  await assert.rejects(h.api.openDateCalendar(new Element(), "交易日期"), /日期控件不唯一/);
-});
 test("task failure emits a diagnostic stage before finalizing", async () => {
   const h = harness([[row("O1","R1",false).e]], null);
   await h.api.run("T1");
@@ -286,47 +224,80 @@ test("task failure emits a diagnostic stage before finalizing", async () => {
   assert.equal(entries.at(-1).level, "error");
   assert.equal(entries.at(-1).message, h.messages.at(-1).error);
 });
-test("focus-opened calendar is not immediately closed by a following click", async () => {
-  const h = harness([[row("O1","R1").e]]), input = new Element(), calendar = new Element();
-  let opened = false, clicks = 0;
-  input.focus = () => { opened = true; };
-  input.onClick = () => { clicks++; opened = !opened; };
-  h.doc.selectors[".layui-laydate"] = () => opened ? [calendar] : [];
-  assert.equal(await h.api.openDateCalendar(input, "交易日期"), calendar);
-  assert.equal(clicks, 0);
-  assert.equal(opened, true);
+function preservedList(h, value = "2026/10/01 ~ 2026/10/04") {
+  const input = new Element(); input.value = value;
+  input.onClick = () => { throw new Error("date input clicked"); };
+  input.dispatchEvent = () => { throw new Error("date input modified"); };
+  const field = new Element("", {"input":[input],"label":[new Element("交易日期*")]});
+  const query = new Element("查询"); query.onClick = () => { throw new Error("query clicked"); };
+  h.doc.selectors[".search-item"] = [field];
+  h.doc.selectors["button"] = [query];
+  return {url:"https://portal.test/app#/auditOfTrade2026",page:1,total:1,signature:"O1::R1",filters:[{label:"交易日期*",value}]};
+}
+test("return validates preserved results without clicking dates or query", async () => {
+  const h = harness([[row("O1","R1").e]]), checkpoint = preservedList(h);
+  await h.api.restoreList(checkpoint);
+  assert.equal(h.context.location.hash, "#/auditOfTrade2026");
 });
-test("explicit focus event opens calendar without an additional toggle click", async () => {
-  const h = harness([[row("O1","R1").e]]), input = new Element(), calendar = new Element();
-  let opened = false, clicks = 0;
-  input.focus = () => {};
-  input.dispatchEvent = e => { if (e.type === "focus") opened = true; };
-  input.onClick = () => { clicks++; opened = !opened; };
-  h.doc.selectors[".layui-laydate"] = () => opened ? [calendar] : [];
-  assert.equal(await h.api.openDateCalendar(input, "交易日期"), calendar);
-  assert.equal(clicks, 0);
+test("lost original conditions stop without resetting dates or querying", async () => {
+  const h = harness([[row("O1","R1").e]]), checkpoint = preservedList(h);
+  h.doc.querySelector(".search-item").querySelector("input").value = "";
+  await assert.rejects(h.api.restoreList(checkpoint), /原查询条件或总条数未保留/);
 });
-test("restoring an earlier month navigates calendar and selects only the exact date", async () => {
-  const h = harness([[row("O1","R1").e]]), calendar = new Element(), panel = new Element();
-  let month = 10, selected = false;
-  const arrow = new Element(), cell = new Element("3");
-  cell.getAttribute = () => "2026-9-3";
-  cell.onClick = () => { selected = true; };
-  arrow.onClick = () => { month--; };
-  panel.selectors[".laydate-set-ym"] = () => [new Element("2026 年 " + month + " 月")];
-  panel.selectors[".laydate-prev-m"] = [arrow];
-  calendar.selectors[".layui-laydate-main"] = [panel];
-  calendar.selectors["td[lay-ymd]"] = () => month === 9 ? [cell] : [];
-  h.doc.selectors[".layui-laydate"] = [calendar];
-  await h.api.selectCalendarDate("2026-9-3");
-  assert.equal(month, 9);
-  assert.equal(selected, true);
+test("changed preserved orders stop without attempting to requery", async () => {
+  const h = harness([[row("O2","R2").e]]), checkpoint = preservedList(h);
+  await assert.rejects(h.api.restoreList(checkpoint), /订单集合与原查询不同/);
 });
-test("ambiguous date cells fail instead of selecting the first", async () => {
-  const h = harness([[row("O1","R1").e]]), calendar = new Element();
-  const cells = [new Element("3"), new Element("3")];
-  cells.forEach(cell => { cell.getAttribute = () => "2026-10-3"; cell.onClick = () => { throw new Error("ambiguous date clicked"); }; });
-  calendar.selectors["td[lay-ymd]"] = cells;
-  h.doc.selectors[".layui-laydate"] = [calendar];
-  await assert.rejects(h.api.selectCalendarDate("2026-10-3"), /目标日期不唯一/);
+function withImages(labels) {
+  const one = row("O1","R1",false);
+  const containers = labels.map(label => {
+    const img = new Element(); Object.assign(img,{complete:true,naturalWidth:100,currentSrc:"https://portal.test/" + label});
+    return new Element("",{"p":[new Element(label)],"img.el-image__inner":[img]});
+  });
+  const detail = new Element("订单号 O1",{".image-container1":containers});
+  const h = harness([[one.e]],detail);
+  one.control.onClick = h.open;
+  h.context.Blob = Blob; h.context.AbortSignal = AbortSignal;
+  h.context.fetch = async () => ({ok:true,blob:async () => new Blob([new Uint8Array([0xff,0xd8,0xff])])});
+  h.context.FileReader = class { readAsDataURL(blob) {this.result="data:" + blob.type + ";base64,/9j/";this.onload();} };
+  h.context.chrome.runtime.sendMessage = async message => {
+    h.messages.push(message);
+    if (message.type === "PIC_EXPERT_DOWNLOAD_PAIR") return {ok:true,files:Object.fromEntries(Object.keys(message.assets).map(kind => [kind,{filename:"R1/" + kind + ".jpg"}]))};
+    return {ok:true};
+  };
+  return {h,containers};
+}
+test("all three available proof images are sent and recorded alongside required images", async () => {
+  const {h} = withImages(["SN码照片","发票图片","证明材料图一","证明材料图二","证明材料图三"]);
+  await h.api.run("T1");
+  const message = h.messages.find(m => m.type === "PIC_EXPERT_DOWNLOAD_PAIR");
+  assert.deepEqual(Object.keys(message.assets), ["SN码","发票","证明材料图一","证明材料图二","证明材料图三"]);
+  const result = h.messages.find(m => m.type === "PIC_EXPERT_MANIFEST_ROW").row;
+  assert.equal(result.proof3File, "R1/证明材料图三.jpg");
+});
+test("proof images remain optional and gaps retain their original label", async () => {
+  const {h} = withImages(["SN码照片","发票图片","证明材料图三"]);
+  await h.api.run("T1");
+  const message = h.messages.find(m => m.type === "PIC_EXPERT_DOWNLOAD_PAIR");
+  assert.deepEqual(Object.keys(message.assets), ["SN码","发票","证明材料图三"]);
+  const result = h.messages.find(m => m.type === "PIC_EXPERT_MANIFEST_ROW").row;
+  assert.equal(result.proof1File, "");
+  assert.equal(result.proof2File, "");
+  assert.equal(result.proof3File, "R1/证明材料图三.jpg");
+});
+test("present proof image is awaited until loaded", async () => {
+  const {h,containers} = withImages(["SN码照片","发票图片","证明材料图一"]);
+  const image = containers[2].querySelector("img.el-image__inner");
+  image.complete = false; image.naturalWidth = 0;
+  h.schedule(2000, () => { image.complete = true; image.naturalWidth = 100; });
+  await h.api.run("T1");
+  assert.ok(h.messages.find(m => m.type === "PIC_EXPERT_DOWNLOAD_PAIR").assets["证明材料图一"]);
+});
+test("ambiguous proof images prevent the whole order download", async () => {
+  const {h,containers} = withImages(["SN码照片","发票图片","证明材料图一"]);
+  const another = new Element(); Object.assign(another,{complete:true,naturalWidth:100,currentSrc:"https://portal.test/other"});
+  containers[2].selectors["img.el-image__inner"].push(another);
+  await h.api.run("T1");
+  assert.equal(h.messages.some(m => m.type === "PIC_EXPERT_DOWNLOAD_PAIR"), false);
+  assert.match(h.messages.find(m => m.type === "PIC_EXPERT_MANIFEST_ROW").row.reason, /证明材料图一.*不唯一/);
 });
