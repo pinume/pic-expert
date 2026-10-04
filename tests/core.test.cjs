@@ -8,7 +8,7 @@ test("sanitizePathPart removes unsafe filename characters", () => {
 
 test("buildManifestCsv emits one header and quotes fields", () => {
   const csv = core.buildManifestCsv([{orderNo:"1",referenceNo:"A",result:"成功",reason:'x,"y"',snFile:"SN码.jpg",invoiceFile:"发票.jpg"}]);
-  assert.match(csv, /^\uFEFF订单号,参考号,处理结果,原因,SN码文件,发票文件/);
+  assert.equal(csv.split("\r\n")[0], "\uFEFF订单号,参考号,处理结果,原因");
   assert.match(csv, /"x,""y"""/);
 });
 
@@ -21,9 +21,9 @@ test("extension derives from actual bytes, not an extensionless URL", () => {
   assert.deepEqual(core.imageFormat([0xff,0xd8,0xff]), { mime: "image/jpeg", extension: ".jpg" });
   assert.throws(() => core.imageFormat(Buffer.from("<html>login</html>")), /无法识别/);
 });
-test("manifest adds three proof columns and leaves missing proofs empty", () => {
+test("manifest contains only four columns even when image paths exist", () => {
   const row = {orderNo:"O1",referenceNo:"R1",result:"成功",reason:"",...core.manifestFiles({"SN码":{filename:"SN码.jpg"},"发票":{filename:"发票.jpg"},"证明材料图三":{filename:"证明材料图三.png"}})};
   const csv = core.buildManifestCsv([row]).split("\r\n");
-  assert.match(csv[0], /证明材料图一文件,证明材料图二文件,证明材料图三文件$/);
-  assert.equal(csv[1], "O1,R1,成功,,SN码.jpg,发票.jpg,,,证明材料图三.png");
+  assert.equal(csv[0], "\uFEFF订单号,参考号,处理结果,原因");
+  assert.equal(csv[1], "O1,R1,成功,");
 });

@@ -126,7 +126,7 @@ function interruptedTask(result = "失败") {
     manifestRows:[{orderNo:"O1",referenceNo:"R1",result,reason:"页面中断",snFile:"",invoiceFile:""}],
     downloads:{R1:{orderNo:"O1",status:"pending",files:{"SN码":{downloadId:1,filename:"pic-expert/T1/R1/SN码.jpg"}}}}};
 }
-test("worker recovery reconciles leftover files into an already recorded row and CSV", async () => {
+test("worker recovery reconciles leftover files and logs paths omitted from CSV", async () => {
   const h = harness({failRemove:true}, interruptedTask());
   await h.send({type:"PIC_EXPERT_TASK_STOP"},{});
   const rows = h.task().manifestRows;
@@ -135,7 +135,8 @@ test("worker recovery reconciles leftover files into an already recorded row and
   assert.equal(rows[0].invoiceFile, "");
   assert.equal(rows[0].result, "失败");
   assert.match(rows[0].reason, /页面中断.*部分文件无法清理/);
-  assert.match(decodeURIComponent(h.calls[0].url), /pic-expert\/T1\/R1\/SN码.jpg/);
+  assert.ok(h.task().logs.some(entry => entry.stage === "残留文件" && entry.message.includes(rows[0].snFile)));
+  assert.doesNotMatch(decodeURIComponent(h.calls[0].url), /SN码.jpg/);
   assert.equal(h.task().failed, 1);
 });
 test("rolled-back pair clears stale paths and success from an existing row", async () => {
@@ -203,7 +204,7 @@ test("paired downloads and CSV completion are persisted in task logs", async () 
   assert.ok(logs.some(entry => entry.stage === "下载清单" && entry.message.includes("清单已下载")));
 });
 const proofAssets = {...assets,"证明材料图一":assets["SN码"],"证明材料图二":assets["发票"],"证明材料图三":assets["SN码"]};
-test("duplicate messages download five correctly named files once and include proof paths in CSV", async () => {
+test("duplicate messages download five files once and export a four-column CSV", async () => {
   const h = harness(), {task} = await h.begin();
   const message = {type:"PIC_EXPERT_DOWNLOAD_PAIR",taskId:task.id,orderNo:"O1",referenceNo:"R1",assets:proofAssets};
   const results = await Promise.all([h.send(message),h.send(message)]);
@@ -214,7 +215,7 @@ test("duplicate messages download five correctly named files once and include pr
   assert.match(h.calls[4].filename, /\/R1\/证明材料图三.jpg$/);
   await h.send({type:"PIC_EXPERT_TASK_END",taskId:task.id,status:"completed"});
   assert.equal(h.task().manifestRows[0].proof2File, h.calls[3].filename);
-  assert.match(decodeURIComponent(h.calls[5].url), /证明材料图三.jpg/);
+  assert.equal(decodeURIComponent(h.calls[5].url).split(",").slice(1).join(","), "\uFEFF订单号,参考号,处理结果,原因\r\nO1,R1,成功,");
 });
 test("failed proof image rolls back required and optional files and never succeeds", async () => {
   const h = harness({failProof:"证明材料图二"}), {task} = await h.begin();

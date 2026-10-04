@@ -119,10 +119,11 @@ const downloadPair = async (message, sender) => {
             await chrome.downloads.removeFile(file.downloadId);
           } catch { leftovers[kind] = file; }
         }
-        const reason = error.message + (Object.keys(leftovers).length ? "；部分文件无法清理，请查看清单路径。" : "");
+        const reason = error.message + (Object.keys(leftovers).length ? "；部分文件无法清理，请查看运行日志。" : "");
         await patchTask(taskId, sender, t => {
           t.downloads[referenceNo] = { orderNo, status: "failed", files: leftovers, error: reason };
           appendLog(t, "下载回滚", "参考号 " + referenceNo + "：" + reason, "error");
+          for (const [kind, file] of Object.entries(leftovers)) appendLog(t, "残留文件", kind + "：" + file.filename, "error");
         }, false);
         const failure = new Error(reason);
         failure.files = leftovers;
@@ -159,8 +160,9 @@ const finalizeTask = (message, sender) => {
           }
           await patchTask(taskId, sender, t => {
             t.downloads[referenceNo] = { ...pair, status: "failed", files: leftovers,
-              error: "任务中断。" + (Object.keys(leftovers).length ? "部分文件无法清理，请查看清单路径。" : "") };
+              error: "任务中断。" + (Object.keys(leftovers).length ? "部分文件无法清理，请查看运行日志。" : "") };
             appendLog(t, "恢复下载", "参考号 " + referenceNo + "：" + t.downloads[referenceNo].error, "error");
+            for (const [kind, file] of Object.entries(leftovers)) appendLog(t, "残留文件", kind + "：" + file.filename, "error");
           }, false);
         }
       }

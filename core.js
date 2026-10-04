@@ -19,13 +19,12 @@
   };
 
   const buildManifestCsv = (rows) => {
-    const headers = ["订单号", "参考号", "处理结果", "原因", "SN码文件", "发票文件", ...PROOF_KINDS.map(kind => kind + "文件")];
+    const headers = ["订单号", "参考号", "处理结果", "原因"];
     const lines = [headers, ...rows.map((row) => [
       row.orderNo,
       row.referenceNo,
       row.result,
-      row.reason,
-      ...FILE_FIELDS.map(field => row[field])
+      row.reason
     ])];
     return `\uFEFF${lines.map((line) => line.map(csvCell).join(",")).join("\r\n")}`;
   };
