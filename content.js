@@ -157,7 +157,6 @@
     }
     return result;
   };
-  const findAssets = scope => Object.fromEntries(Object.entries(inspectAssets(scope)).map(([kind, state]) => [kind, state.url]));
   const prepareAsset = async url => {
     let response;
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -347,5 +346,5 @@
     return false;
   });
   // Exposed only by Node's test harness; not installed on the page's MAIN world.
-  if (typeof module !== "undefined" && module.exports) module.exports = { currentTable, findAssets, detailScope, run, processRow, restoreList, goToPage };
+  if (typeof module !== "undefined" && module.exports) module.exports = { currentTable, detailScope, run, processRow, restoreList, goToPage };
 })();
