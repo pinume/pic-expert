@@ -8,15 +8,6 @@
     return cleaned || fallback;
   };
 
-  const extensionFromUrl = (rawUrl, fallback = ".jpg") => {
-    try {
-      const url = new URL(rawUrl);
-      const match = url.pathname.match(/(\.[a-z0-9]{2,5})$/i);
-      if (match && /^\.(?:jpe?g|png|webp|gif|bmp|tiff?|heic|pdf)$/i.test(match[1])) return match[1].toLowerCase();
-    } catch {}
-    return fallback;
-  };
-
   const csvCell = (value) => {
     const text = String(value ?? "");
     return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
@@ -37,10 +28,22 @@
 
   const makeTaskId = (date = new Date()) => {
     const p = (n) => String(n).padStart(2, "0");
-    return `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}-${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`;
+    return `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}-${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}-${crypto.randomUUID()}`;
   };
 
-  const api = Object.freeze({ cleanText, sanitizePathPart, extensionFromUrl, buildManifestCsv, makeTaskId });
+  const imageFormat = (bytes) => {
+    const b = Array.from(bytes);
+    const starts = (...prefix) => prefix.every((v, i) => b[i] === v);
+    if (starts(0xff, 0xd8, 0xff)) return { mime: "image/jpeg", extension: ".jpg" };
+    if (starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return { mime: "image/png", extension: ".png" };
+    const ascii = String.fromCharCode(...b);
+    if (/^GIF8[79]a/.test(ascii)) return { mime: "image/gif", extension: ".gif" };
+    if (ascii.startsWith("RIFF") && ascii.slice(8, 12) === "WEBP") return { mime: "image/webp", extension: ".webp" };
+    if (starts(0x42, 0x4d)) return { mime: "image/bmp", extension: ".bmp" };
+    throw new Error("图片内容无法识别，已跳过以避免保存错误文件。");
+  };
+
+  const api = Object.freeze({ cleanText, sanitizePathPart, buildManifestCsv, makeTaskId, imageFormat });
   globalThis.PIC_EXPERT_CORE = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();

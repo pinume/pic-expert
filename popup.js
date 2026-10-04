@@ -1,50 +1,66 @@
 const startButton = document.querySelector("#start");
+const stopButton = document.querySelector("#stop");
+const retryButton = document.querySelector("#retry");
 const statusElement = document.querySelector("#status");
 const progressElement = document.querySelector("#progress");
 const errorElement = document.querySelector("#error");
-let pollTimer = null;
-
-const renderTask = (task) => {
-  if (!task) {
-    statusElement.textContent = "未开始";
-    progressElement.textContent = "";
-    return;
-  }
-  const labels = { running: "运行中", completed: "已完成", failed: "已停止" };
-  statusElement.textContent = labels[task.status] || task.status;
-  progressElement.textContent = `页 ${task.page || 1} · 已检查 ${task.scanned || 0} · 成功 ${task.completed || 0} · 跳过 ${task.skipped || 0} · 失败 ${task.failed || 0}${task.stage ? ` · ${task.stage}` : ""}`;
-  errorElement.textContent = task.error || "";
-  startButton.disabled = task.status === "running";
+const request = async message => {
+  const response = await chrome.runtime.sendMessage(message);
+  if (!response?.ok) throw new Error(response?.error || "后台无响应。");
+  return response;
 };
-
+const renderTask = task => {
+  const labels = { running: "运行中", stopping: "正在停止", finalizing: "正在生成清单", completed: "已完成", failed: "已停止" };
+  statusElement.textContent = task ? labels[task.status] || task.status : "未开始";
+  progressElement.textContent = task ? "页 " + task.page + " · 已检查 " + task.scanned +
+    " · 成功 " + task.completed + " · 跳过 " + task.skipped + " · 失败 " + task.failed : "";
+  errorElement.textContent = [task?.error, task?.manifestError].filter(Boolean).join("\n");
+  startButton.disabled = ["running", "stopping", "finalizing"].includes(task?.status);
+  stopButton.hidden = !["running", "stopping", "finalizing"].includes(task?.status);
+  retryButton.hidden = !task?.manifestError;
+};
 const refresh = async () => {
-  const response = await chrome.runtime.sendMessage({ type: "PIC_EXPERT_TASK_STATE" }).catch(() => null);
-  if (response?.ok) renderTask(response.task);
+  try { renderTask((await request({ type: "PIC_EXPERT_TASK_STATE" })).task); }
+  catch (error) { errorElement.textContent = error.message; }
 };
-
-const beginPolling = () => {
-  clearInterval(pollTimer);
-  pollTimer = setInterval(refresh, 750);
-};
-
 startButton.addEventListener("click", async () => {
   startButton.disabled = true;
   errorElement.textContent = "";
-  statusElement.textContent = "正在启动…";
+  let task;
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) throw new Error("没有可用的当前标签页。 ");
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["page-core.js", "content.js"] });
-    const response = await chrome.tabs.sendMessage(tab.id, { type: "PIC_EXPERT_START" });
-    if (!response?.ok) throw new Error(response?.error || "任务启动失败。 ");
-    renderTask(response.task);
+    if (!tab?.id) throw new Error("没有可用的当前标签页。");
+    const injected = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: true }, files: ["core.js", "page-core.js", "content.js"]
+    });
+    const probes = await Promise.all(injected.map(async result => ({
+      frameId: result.frameId,
+      result: await chrome.tabs.sendMessage(tab.id, { type: "PIC_EXPERT_PROBE" }, { frameId: result.frameId }).catch(() => null)
+    })));
+    const frameId = globalThis.PIC_EXPERT_PAGE_CORE.chooseFrame(probes);
+    task = (await request({ type: "PIC_EXPERT_TASK_BEGIN", sourceUrl: tab.url, tabId: tab.id, frameId })).task;
+    const response = await chrome.tabs.sendMessage(tab.id, { type: "PIC_EXPERT_START", taskId: task.id }, { frameId });
+    if (!response?.ok) throw new Error(response?.error || "页面任务启动失败。");
+    renderTask(task);
   } catch (error) {
-    errorElement.textContent = error?.message || String(error);
-    startButton.disabled = false;
+    if (task) await request({ type: "PIC_EXPERT_TASK_END", taskId: task.id, status: "failed", error: error.message }).catch(() => {});
     await refresh();
+    errorElement.textContent = error.message;
+    startButton.disabled = false;
   }
 });
-
+stopButton.addEventListener("click", async () => {
+  stopButton.disabled = true;
+  try { renderTask((await request({ type: "PIC_EXPERT_TASK_STOP" })).task); }
+  catch (error) { errorElement.textContent = error.message; }
+  finally { stopButton.disabled = false; }
+});
+retryButton.addEventListener("click", async () => {
+  retryButton.disabled = true;
+  try { renderTask((await request({ type: "PIC_EXPERT_MANIFEST_RETRY" })).task); }
+  catch (error) { errorElement.textContent = error.message; }
+  finally { retryButton.disabled = false; }
+});
 refresh();
-beginPolling();
+const pollTimer = setInterval(refresh, 1000);
 window.addEventListener("unload", () => clearInterval(pollTimer));

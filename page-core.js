@@ -13,17 +13,32 @@
 
   const isMaterialModification = (text) => /材料修改/.test(String(text ?? ""));
 
-  const isImageLikeUrl = (value) => {
-    const text = String(value ?? "").trim();
-    return /^(?:https?:|blob:|data:image\/)/i.test(text) || /\.(?:jpe?g|png|webp|gif|bmp|tiff?|heic|pdf)(?:[?#].*)?$/i.test(text);
-  };
-
   const chooseUnique = (values) => {
     const unique = [...new Set(values.filter(Boolean))];
     return unique.length === 1 ? unique[0] : null;
   };
 
-  const api = Object.freeze({ normalize, inferColumns, isMaterialModification, isImageLikeUrl, chooseUnique });
+  const assetKind = (label) => {
+    const text = normalize(label).replace(/^[（(](?:必填|选填)[）)]/, "").replace(/[:：]$/, "");
+    if (/^(?:S\/?N码(?:照片|图片)?|序列号(?:照片|图片)?)$/i.test(text)) return "SN码";
+    if (/^发票(?:照片|图片)?$/.test(text)) return "发票";
+    return null;
+  };
+  const dateRange = (value) => {
+    const matches = String(value).match(/\d{4}[/-]\d{1,2}[/-]\d{1,2}/g);
+    if (matches?.length !== 2) throw new Error("无法解析原查询日期，已停止。");
+    return matches.map(s => s.split(/[/-]/).map(Number).join("-"));
+  };
+  const chooseFrame = (results) => {
+    const frames = results.filter(x => x.result?.ok && x.result.ready);
+    if (frames.length !== 1) throw new Error(frames.length ? "发现多个订单列表，无法唯一定位。" : "未找到已查询的订单列表，请先完成查询。");
+    return frames[0].frameId;
+  };
+  const hasIdentity = (text, orderNo) => {
+    const escaped = String(orderNo).replace(/[.*+?^\$\{\}()|[\]\\]/g, "\\$&");
+    return Boolean(orderNo) && new RegExp(`(?:^|[^a-zA-Z0-9])${escaped}(?:$|[^a-zA-Z0-9])`).test(text);
+  };
+  const api = Object.freeze({ normalize, inferColumns, isMaterialModification, chooseUnique, assetKind, dateRange, chooseFrame, hasIdentity });
   globalThis.PIC_EXPERT_PAGE_CORE = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();
