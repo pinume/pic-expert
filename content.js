@@ -64,18 +64,43 @@
     return { scope, page, total };
   };
   const disabled = e => !e || e.disabled || e.getAttribute("aria-disabled") === "true" || e.classList.contains("is-disabled");
+  const waitPage = async (target, total, previousSignature) => {
+    let candidate = "", stableSince = 0;
+    await wait(() => {
+      const after = pager(), value = signature();
+      if (loading() || after.page !== target || after.total !== total || !value || value === previousSignature) {
+        candidate = ""; return false;
+      }
+      if (candidate !== value) { candidate = value; stableSince = Date.now(); return false; }
+      return Date.now() - stableSince >= 600;
+    }, "翻页后页码或订单结果未能确认。");
+  };
   const pageStep = async direction => {
     const before = pager();
+    const previousSignature = signature();
     const button = before.scope.querySelector(direction > 0 ? ".btn-next" : ".btn-prev");
     if (disabled(button)) return false;
     button.click();
-    await wait(() => {
-      if (loading() || !currentTable()) return false;
-      const after = pager();
-      return after.page === before.page + direction && after.total === before.total;
-    }, "翻页后页码或订单结果未能确认。");
-    await sleep(300);
+    await waitPage(before.page + direction, before.total, previousSignature);
     return true;
+  };
+  const goToPage = async target => {
+    const before = pager();
+    if (before.page === target) return;
+    const previousSignature = signature();
+    const numbers = all(".el-pager .number", before.scope).filter(e => Number(e.textContent) === target);
+    const jump = all(".el-pagination__jump input", before.scope);
+    if (numbers.length === 1 && !disabled(numbers[0])) numbers[0].click();
+    else if (jump.length === 1 && !disabled(jump[0])) {
+      setInput(jump[0], String(target));
+      jump[0].dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
+    } else {
+      while (pager().page !== target) {
+        if (!await pageStep(pager().page < target ? 1 : -1)) throw new Error("无法恢复原查询页码。");
+      }
+      return;
+    }
+    await waitPage(target, before.total, previousSignature);
   };
   const snapshot = () => ({
     url: location.href, signature: signature(), ...((({ page, total }) => ({ page, total }))(pager())),
@@ -132,9 +157,7 @@
     if (query.length !== 1) throw new Error("查询入口不唯一。");
     query[0].click();
     await wait(() => !loading() && currentTable() && pager().total === checkpoint.total, "原查询结果没有恢复。");
-    while (pager().page < checkpoint.page) {
-      if (!await pageStep(1)) throw new Error("无法恢复原查询页码。");
-    }
+    await goToPage(checkpoint.page);
     if (pager().page !== checkpoint.page || signature() !== checkpoint.signature) throw new Error("恢复后的订单集合与原查询不同，已停止。");
   };
   const findAssets = scope => {
@@ -188,9 +211,16 @@
     const id = identity(row, table.columns);
     const empty = { ...id, snFile: "", invoiceFile: "" };
     if (!id.orderNo || !id.referenceNo) return { ...empty, result: "跳过", reason: "订单号或参考号缺失" };
-    if (CORE.isMaterialModification(row.textContent)) return { ...empty, result: "跳过", reason: "材料修改" };
-    const controls = all("button,a,[role=button]", row.querySelectorAll("td")[table.columns.operation])
-      .filter(e => /^(查看详情|详情)$/.test(clean(e.textContent)));
+    const clones = all(".el-table__fixed-body-wrapper", table.root).flatMap(body => all("tbody tr", body))
+      .filter(other => key(identity(other, table.columns)) === key(id));
+    const matchingRows = [row, ...clones];
+    if (matchingRows.some(other => CORE.isMaterialModification(other.textContent))) return { ...empty, result: "跳过", reason: "材料修改" };
+    const rowControls = other => {
+      const cell = other.querySelectorAll("td")[table.columns.operation];
+      return cell ? all("button,a,[role=button]", cell).filter(e => /^(查看详情|详情)$/.test(clean(e.textContent))) : [];
+    };
+    const mainControls = rowControls(row);
+    const controls = mainControls.length ? mainControls : [...new Set(clones.flatMap(rowControls))];
     if (controls.length !== 1) return { ...empty, result: "失败", reason: "详情入口不唯一" };
     const checkpoint = snapshot();
     controls[0].click();
@@ -228,7 +258,7 @@
     let scanned = 0, completed = 0, skipped = 0, failed = 0, visited = 0;
     const seen = new Set();
     try {
-      while (await pageStep(-1)) {}
+      await goToPage(1);
       const initial = snapshot();
       const total = initial.total;
       while (true) {
@@ -241,7 +271,7 @@
           if (signature() !== pageSignature || JSON.stringify(snapshot().filters) !== JSON.stringify(initial.filters)) throw new Error("任务运行期间查询结果或条件发生变化。");
           visited += 1;
           if (visited > total) throw new Error("扫描条数超过原查询总条数。");
-          if (seen.has(key(id))) continue;
+          if (seen.has(key(id))) throw new Error("查询结果出现重复订单身份，已停止。");
           seen.add(key(id));
           const fresh = currentTable();
           const matches = fresh?.rows.filter(row => key(identity(row, fresh.columns)) === key(id)) || [];
@@ -284,5 +314,5 @@
     return false;
   });
   // Exposed only by Node's test harness; not installed on the page's MAIN world.
-  if (typeof module !== "undefined" && module.exports) module.exports = { currentTable, findAssets, detailScope, run, processRow, restoreList };
+  if (typeof module !== "undefined" && module.exports) module.exports = { currentTable, findAssets, detailScope, run, processRow, restoreList, goToPage };
 })();

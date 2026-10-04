@@ -139,22 +139,28 @@ const finalizeTask = (message, sender) => {
             } catch { leftovers[kind] = file; }
           }
           await patchTask(taskId, sender, t => {
-            t.downloads[referenceNo] = { ...pair, status: "failed", files: leftovers, error: "任务中断。" };
+            t.downloads[referenceNo] = { ...pair, status: "failed", files: leftovers,
+              error: "任务中断。" + (Object.keys(leftovers).length ? "部分文件无法清理，请查看清单路径。" : "") };
           }, false);
         }
       }
       task = await patchTask(taskId, sender, t => {
         for (const [referenceNo, pair] of Object.entries(t.downloads)) {
-          if (!t.manifestRows.some(row => row.referenceNo === referenceNo && row.orderNo === pair.orderNo)) {
-            t.manifestRows.push({ orderNo: pair.orderNo, referenceNo,
-              result: pair.status === "complete" ? "成功" : "失败", reason: pair.error || "",
-              snFile: pair.files["SN码"]?.filename || "", invoiceFile: pair.files["发票"]?.filename || "" });
+          const existing = t.manifestRows.find(row => row.referenceNo === referenceNo && row.orderNo === pair.orderNo);
+          const row = existing || { orderNo: pair.orderNo, referenceNo, result: "成功", reason: "" };
+          if (pair.status !== "complete") {
+            row.result = "失败";
+            row.reason = [...new Set([row.reason, pair.error || "下载未完成。"].filter(Boolean))].join("；");
           }
+          row.snFile = pair.files["SN码"]?.filename || "";
+          row.invoiceFile = pair.files["发票"]?.filename || "";
+          if (!existing) t.manifestRows.push(row);
         }
         if (t.currentRow && !t.manifestRows.some(row => row.orderNo === t.currentRow.orderNo && row.referenceNo === t.currentRow.referenceNo)) {
           t.manifestRows.push({ ...t.currentRow, result: "失败", reason: t.error || "任务中断。", snFile: "", invoiceFile: "" });
         }
         delete t.currentRow;
+        t.scanned = t.manifestRows.length;
         t.finishedAt = new Date().toISOString();
         for (const [key, result] of [["completed", "成功"], ["skipped", "跳过"], ["failed", "失败"]]) {
           t[key] = t.manifestRows.filter(row => row.result === result).length;
@@ -165,7 +171,10 @@ const finalizeTask = (message, sender) => {
       if (t.finalStatus) { t.status = t.finalStatus; delete t.finalStatus; }
     }, false);
     if (task.manifestDownloadId !== undefined) {
-      try { await waitForDownload(task.manifestDownloadId); }
+      try {
+        await waitForDownload(task.manifestDownloadId);
+        await patchTask(taskId, sender, t => { t.manifestError = ""; }, false);
+      }
       catch (error) { await patchTask(taskId, sender, t => { t.manifestError = "清单下载失败：" + error.message; }, false); }
       return settle();
     }
@@ -219,8 +228,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!task || !["completed", "failed"].includes(task.status)) throw new Error("请等待任务结束。");
         if (task.manifestDownloadId !== undefined) {
           const [item] = await chrome.downloads.search({ id: task.manifestDownloadId });
-          if (item?.state === "complete") return { ok: true, task };
-          if (item?.state === "in_progress") { await waitForDownload(item.id); return { ok: true, task }; }
+          if (["complete", "in_progress"].includes(item?.state)) {
+            try {
+              await waitForDownload(item.id);
+              return { ok: true, task: await patchTask(task.id, sender, t => { t.manifestError = ""; }, false) };
+            } catch (error) {
+              await patchTask(task.id, sender, t => { t.manifestError = "清单下载失败：" + error.message; }, false);
+              throw error;
+            }
+          }
         }
         await patchTask(task.id, sender, t => { delete t.manifestDownloadId; }, false);
         return { ok: true, task: await finalizeTask({ taskId: task.id }, sender) };
