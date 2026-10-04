@@ -22,7 +22,6 @@ const update = (id, sender, operation, running = true) => mutate(async () => {
   assertTask(task, id, sender, running);
   const changes = { rows: [], pairs: [], logs: [] };
   await operation(task, changes);
-  task.updatedAt = new Date().toISOString();
   await db.save(task, changes);
   return task;
 });
@@ -65,7 +64,7 @@ const startTask = message => mutate(async () => {
   if (["running", "pausing", "stopping", "finalizing"].includes(existing?.status)) throw new Error("已有任务运行；页面中断时请先暂停或停止。");
   if (!Number.isInteger(message.tabId) || !Number.isInteger(message.frameId)) throw new Error("目标页面不完整。");
   const task = { id: makeTaskId(), status: "running", tabId: message.tabId, frameId: message.frameId,
-    sourceUrl: message.sourceUrl, startedAt: new Date().toISOString(), page: 1,
+    startedAt: new Date().toISOString(), page: 1,
     scanned: 0, completed: 0, skipped: 0, failed: 0 };
   const changes = { logs: [] };
   appendLog(changes, "创建任务", "任务 " + task.id + "，frame " + task.frameId);
@@ -185,7 +184,7 @@ const exportManifest = (taskId, sender, retry = false) => {
   const filename = "pic-expert/" + taskId + "/下载清单.csv";
   try {
     const downloadId = await chrome.downloads.download({ url: "data:text/csv;charset=utf-8," + encodeURIComponent(buildManifestCsv(await db.rows(taskId))), filename, saveAs: false, conflictAction: "overwrite" });
-    await update(taskId, sender, t => { t.manifestDownloadId = downloadId; t.manifestFilename = filename; }, false);
+    await update(taskId, sender, t => { t.manifestDownloadId = downloadId; }, false);
     await waitForDownload(downloadId);
     return update(taskId, sender, (t, c) => { t.manifestError = ""; appendLog(c, "下载清单", "清单已下载：" + filename); }, false);
   } catch (error) {
@@ -209,8 +208,8 @@ const finalizeTask = (message, sender) => {
       await reconcile(taskId, sender);
       task = await update(taskId, sender, (t, c) => {
         t.finishedAt = new Date().toISOString();
-        t.durationMs = Math.max(0, Date.now() - (Date.parse(t.startedAt) || Date.now()));
-        appendLog(c, "处理汇总", "查询 " + (t.checkpoint?.total ?? "未知") + "，检查 " + t.scanned + "，成功 " + t.completed + "，跳过 " + t.skipped + "，失败 " + t.failed + "，历时 " + Math.round(t.durationMs / 1000) + " 秒");
+        const durationMs = Math.max(0, Date.now() - (Date.parse(t.startedAt) || Date.now()));
+        appendLog(c, "处理汇总", "查询 " + (t.checkpoint?.total ?? "未知") + "，检查 " + t.scanned + "，成功 " + t.completed + "，跳过 " + t.skipped + "，失败 " + t.failed + "，历时 " + Math.round(durationMs / 1000) + " 秒");
       }, false);
     }
     await exportManifest(taskId, sender);
@@ -245,9 +244,9 @@ const resumeTask = (message, sender) => mutate(async () => {
   await db.save(task, changes); return task;
 });
 const rowStatus = async (message, sender) => {
-  assertTask(await getTask(), message.taskId, sender);
-  const row = await db.getRow(message.taskId, message.identity);
   const task = await getTask();
+  assertTask(task, message.taskId, sender);
+  const row = await db.getRow(message.taskId, message.identity);
   if (row?.page && row.page !== task.page) throw new Error("同一订单出现在不同页，查询结果已变化。");
   if (row?.result === "跳过") return { done: true };
   if (row?.result !== "成功") return { done: false };
@@ -292,8 +291,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           await upsertRow(t, c, message.row);
           appendLog(c, "订单结果", message.row.result + (message.row.reason ? "：" + message.row.reason : ""), message.row.result === "失败" ? "error" : "info");
         }) };
-      case "PIC_EXPERT_PROGRESS":
-        return { ok: true, task: await update(message.taskId, sender, t => { t.page = message.page ?? t.page; }) };
       case "PIC_EXPERT_TASK_END": return { ok: true, task: await summary(await finalizeTask(message, sender)) };
       case "PIC_EXPERT_TASK_STOP": {
         const task = await getTask();

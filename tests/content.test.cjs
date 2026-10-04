@@ -91,19 +91,6 @@ test("all query pages are scanned and material modification rows skipped", async
   assert.ok(rows.every(m => m.row.result === "跳过" && m.row.reason === "材料修改"));
   assert.equal(h.messages.at(-1).status, "completed");
 });
-test("portal labels select real previews including proof images", () => {
-  const real = new Element();
-  Object.assign(real, {complete:true, naturalWidth:100, currentSrc:"https://portal.test/image1"});
-  const invoice = new Element();
-  Object.assign(invoice, {complete:true, naturalWidth:100, currentSrc:"https://portal.test/image2"});
-  const container = (label, image) => new Element("", {"p":[new Element(label)], "img.el-image__inner":[image]});
-  const scope = new Element("", {".image-container1":[container("（必填）SN码照片",real),
-    container("（必填）发票图片",invoice), container("证明材料图一",real)]});
-  const h = harness([[row("O1","R1").e]]);
-  assert.equal(h.api.findAssets(scope)["SN码"], real.currentSrc);
-  assert.equal(h.api.findAssets(scope)["发票"], invoice.currentSrc);
-  assert.equal(h.api.findAssets(scope)["证明材料图一"], real.currentSrc);
-});
 test("failure to return to a confirmed list stops before the next order", async () => {
   const one = row("O1", "R1", false), two = row("O2", "R2", false);
   const detail = new Element("订单号 O1 商品信息");

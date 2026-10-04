@@ -53,10 +53,8 @@
     return { orderNo: clean(cells[columns.orderNo]?.textContent), referenceNo: clean(cells[columns.referenceNo]?.textContent) };
   };
   const key = value => value.orderNo + "::" + value.referenceNo;
-  const signature = () => {
-    const table = currentTable();
-    return table ? table.rows.map(r => key(identity(r, table.columns))).join("\n") : "";
-  };
+  const signature = (table = currentTable()) =>
+    table ? table.rows.map(r => key(identity(r, table.columns))).join("\n") : "";
   const loading = () => all(".el-loading-mask").length > 0;
   const pager = () => {
     const scopes = all(".el-pagination");
@@ -159,7 +157,6 @@
     }
     return result;
   };
-  const findAssets = scope => Object.fromEntries(Object.entries(inspectAssets(scope)).map(([kind, state]) => [kind, state.url]));
   const prepareAsset = async url => {
     let response;
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -286,17 +283,19 @@
         if (signature() !== checkpoint.signature) throw new Error("断点页订单集合已变化，不能安全继续。");
       } else await goToPage(1);
       const initial = snapshot();
+      const initialFilters = JSON.stringify(initial.filters);
       const total = initial.total;
       while (true) {
         const table = currentTable();
         if (!table) throw new Error("无法唯一识别订单表格。");
-        const pageSignature = signature();
+        const pageSignature = signature(table);
         const ids = table.rows.map(row => identity(row, table.columns));
         await checkedSend({ type: "PIC_EXPERT_CHECKPOINT", taskId, checkpoint: { ...snapshot(), visitedBefore: visited } });
         for (const id of ids) {
           if (pauseRequested) throw new Error("已在订单边界暂停。");
           if (stopped) throw new Error("用户停止任务。");
-          if (signature() !== pageSignature || JSON.stringify(snapshot().filters) !== JSON.stringify(initial.filters)) throw new Error("任务运行期间查询结果或条件发生变化。");
+          const current = snapshot();
+          if (current.signature !== pageSignature || JSON.stringify(current.filters) !== initialFilters) throw new Error("任务运行期间查询结果或条件发生变化。");
           visited += 1;
           if (visited > total) throw new Error("扫描条数超过原查询总条数。");
           if (seen.has(key(id))) throw new Error("查询结果出现重复订单身份，已停止。");
@@ -347,5 +346,5 @@
     return false;
   });
   // Exposed only by Node's test harness; not installed on the page's MAIN world.
-  if (typeof module !== "undefined" && module.exports) module.exports = { currentTable, findAssets, detailScope, run, processRow, restoreList, goToPage };
+  if (typeof module !== "undefined" && module.exports) module.exports = { currentTable, detailScope, run, processRow, restoreList, goToPage };
 })();

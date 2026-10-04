@@ -58,7 +58,7 @@ const launch = async resume => {
     })));
     const frameId = globalThis.PIC_EXPERT_PAGE_CORE.chooseFrame(probes);
     if (probes.find(probe => probe.frameId === frameId)?.result?.running) throw new Error("页面上一笔任务仍在退出，请稍候，或手动刷新并恢复原查询后继续。");
-    task = (await request({ type: resume ? "PIC_EXPERT_TASK_RESUME" : "PIC_EXPERT_TASK_BEGIN", sourceUrl: tab.url, tabId: tab.id, frameId })).task;
+    task = (await request({ type: resume ? "PIC_EXPERT_TASK_RESUME" : "PIC_EXPERT_TASK_BEGIN", tabId: tab.id, frameId })).task;
     const response = await chrome.tabs.sendMessage(tab.id, { type: "PIC_EXPERT_START", taskId: task.id, checkpoint: resume ? task.checkpoint : null }, { frameId });
     if (!response?.ok) throw new Error(response?.error || "页面任务启动失败。");
     renderTask(task);
