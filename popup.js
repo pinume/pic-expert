@@ -1,25 +1,34 @@
 const startButton = document.querySelector("#start");
 const stopButton = document.querySelector("#stop");
 const retryButton = document.querySelector("#retry");
+const pauseButton = document.querySelector("#pause");
+const resumeButton = document.querySelector("#resume");
+const exportLogsButton = document.querySelector("#export-logs");
 const statusElement = document.querySelector("#status");
 const progressElement = document.querySelector("#progress");
 const errorElement = document.querySelector("#error");
 const logsElement = document.querySelector("#logs");
 const copyLogsButton = document.querySelector("#copy-logs");
 const copyStatusElement = document.querySelector("#copy-status");
+let exportingLogs = false;
 const request = async message => {
   const response = await chrome.runtime.sendMessage(message);
   if (!response?.ok) throw new Error(response?.error || "后台无响应。");
   return response;
 };
 const renderTask = task => {
-  const labels = { running: "运行中", stopping: "正在停止", finalizing: "正在生成清单", completed: "已完成", failed: "已停止" };
+  const labels = { running: "运行中", pausing: "等待当前订单结束后暂停", paused: "已暂停", stopping: "正在停止", finalizing: "正在生成清单", completed: "已完成", failed: "已停止" };
   statusElement.textContent = task ? labels[task.status] || task.status : "未开始";
   progressElement.textContent = task ? "页 " + task.page + " · 已检查 " + task.scanned +
-    " · 成功 " + task.completed + " · 跳过 " + task.skipped + " · 失败 " + task.failed : "";
+    " · 成功 " + task.completed + " · 跳过 " + task.skipped + " · 失败 " + task.failed +
+    (task.checkpoint ? " · 查询总数 " + task.checkpoint.total : "") : "";
   errorElement.textContent = [task?.error, task?.manifestError].filter(Boolean).join("\n");
-  startButton.disabled = ["running", "stopping", "finalizing"].includes(task?.status);
-  stopButton.hidden = !["running", "stopping", "finalizing"].includes(task?.status);
+  startButton.disabled = ["running", "pausing", "stopping", "finalizing"].includes(task?.status);
+  stopButton.hidden = !["running", "pausing", "paused", "stopping", "finalizing"].includes(task?.status);
+  pauseButton.hidden = !["running", "pausing"].includes(task?.status);
+  pauseButton.textContent = task?.status === "pausing" ? "立即暂停当前等待" : "暂停任务";
+  resumeButton.hidden = !["paused", "failed"].includes(task?.status) || !task?.checkpoint;
+  exportLogsButton.disabled = !task || exportingLogs;
   retryButton.hidden = !task?.manifestError;
   const logText = (task?.logs || []).map(entry => new Date(entry.time).toLocaleString("zh-CN", { hour12: false }) +
     " [" + entry.level + "] " + entry.stage + "：" + entry.message).join("\n");
@@ -33,7 +42,7 @@ const refresh = async () => {
   try { renderTask((await request({ type: "PIC_EXPERT_TASK_STATE" })).task); }
   catch (error) { errorElement.textContent = error.message; }
 };
-startButton.addEventListener("click", async () => {
+const launch = async resume => {
   startButton.disabled = true;
   errorElement.textContent = "";
   let task;
@@ -48,8 +57,9 @@ startButton.addEventListener("click", async () => {
       result: await chrome.tabs.sendMessage(tab.id, { type: "PIC_EXPERT_PROBE" }, { frameId: result.frameId }).catch(() => null)
     })));
     const frameId = globalThis.PIC_EXPERT_PAGE_CORE.chooseFrame(probes);
-    task = (await request({ type: "PIC_EXPERT_TASK_BEGIN", sourceUrl: tab.url, tabId: tab.id, frameId })).task;
-    const response = await chrome.tabs.sendMessage(tab.id, { type: "PIC_EXPERT_START", taskId: task.id }, { frameId });
+    if (probes.find(probe => probe.frameId === frameId)?.result?.running) throw new Error("页面上一笔任务仍在退出，请稍候，或手动刷新并恢复原查询后继续。");
+    task = (await request({ type: resume ? "PIC_EXPERT_TASK_RESUME" : "PIC_EXPERT_TASK_BEGIN", sourceUrl: tab.url, tabId: tab.id, frameId })).task;
+    const response = await chrome.tabs.sendMessage(tab.id, { type: "PIC_EXPERT_START", taskId: task.id, checkpoint: resume ? task.checkpoint : null }, { frameId });
     if (!response?.ok) throw new Error(response?.error || "页面任务启动失败。");
     renderTask(task);
   } catch (error) {
@@ -58,6 +68,24 @@ startButton.addEventListener("click", async () => {
     errorElement.textContent = error.message;
     startButton.disabled = false;
   }
+};
+startButton.addEventListener("click", () => launch(false));
+resumeButton.addEventListener("click", async () => {
+  resumeButton.disabled = true;
+  try { await launch(true); } finally { resumeButton.disabled = false; }
+});
+pauseButton.addEventListener("click", async () => {
+  pauseButton.disabled = true;
+  try { renderTask((await request({ type: "PIC_EXPERT_TASK_PAUSE" })).task); }
+  catch (error) { errorElement.textContent = error.message; }
+  finally { pauseButton.disabled = false; }
+});
+exportLogsButton.addEventListener("click", async () => {
+  exportingLogs = true;
+  exportLogsButton.disabled = true;
+  try { await request({ type: "PIC_EXPERT_LOG_EXPORT" }); copyStatusElement.textContent = "完整日志已开始下载"; }
+  catch (error) { errorElement.textContent = error.message; }
+  finally { exportingLogs = false; exportLogsButton.disabled = false; }
 });
 stopButton.addEventListener("click", async () => {
   stopButton.disabled = true;
