@@ -245,9 +245,9 @@ const resumeTask = (message, sender) => mutate(async () => {
   await db.save(task, changes); return task;
 });
 const rowStatus = async (message, sender) => {
-  assertTask(await getTask(), message.taskId, sender);
-  const row = await db.getRow(message.taskId, message.identity);
   const task = await getTask();
+  assertTask(task, message.taskId, sender);
+  const row = await db.getRow(message.taskId, message.identity);
   if (row?.page && row.page !== task.page) throw new Error("同一订单出现在不同页，查询结果已变化。");
   if (row?.result === "跳过") return { done: true };
   if (row?.result !== "成功") return { done: false };
