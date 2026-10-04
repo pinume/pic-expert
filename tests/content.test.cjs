@@ -23,6 +23,7 @@ class Element {
   getClientRects() { return [{}]; }
   getAttribute() { return null; }
   closest() { return null; }
+  dispatchEvent() {}
   contains(other) { return other === this; }
   click() { this.onClick?.(); }
 }
@@ -51,7 +52,7 @@ function harness(pages, detail = null) {
     chrome: { runtime: { onMessage: { addListener: f => { listener = f; } },
       sendMessage: async message => { messages.push(message); return { ok: true }; } } },
     module: { exports: {} }, location: { href: "https://portal.test/app#/unsupported", origin: "https://portal.test", pathname: "/app" },
-    URL, Date: { now: () => time }, setTimeout: (fn, ms) => {
+    URL, Event: class { constructor(type) { this.type = type; } }, Date: { now: () => time }, setTimeout: (fn, ms) => {
       time += ms;
       for (const item of scheduled.splice(0)) {
         if (item.at <= time) item.fn(); else scheduled.push(item);
@@ -133,6 +134,7 @@ test("standalone return reselects the original dates and verifies the same order
     return e;
   };
   const confirm = new Element("确定");
+  confirm.onClick = () => { input.value = "2026/10/01 ~ 2026/10/04"; };
   const calendar = new Element("", { "td[lay-ymd]": [cell("2026-10-1"), cell("2026-10-4")],
     ".laydate-btns-confirm": [confirm] });
   let queried = 0, opened = false;
@@ -283,4 +285,48 @@ test("task failure emits a diagnostic stage before finalizing", async () => {
   assert.equal(entries.at(-1).stage, "任务中断");
   assert.equal(entries.at(-1).level, "error");
   assert.equal(entries.at(-1).message, h.messages.at(-1).error);
+});
+test("focus-opened calendar is not immediately closed by a following click", async () => {
+  const h = harness([[row("O1","R1").e]]), input = new Element(), calendar = new Element();
+  let opened = false, clicks = 0;
+  input.focus = () => { opened = true; };
+  input.onClick = () => { clicks++; opened = !opened; };
+  h.doc.selectors[".layui-laydate"] = () => opened ? [calendar] : [];
+  assert.equal(await h.api.openDateCalendar(input, "交易日期"), calendar);
+  assert.equal(clicks, 0);
+  assert.equal(opened, true);
+});
+test("explicit focus event opens calendar without an additional toggle click", async () => {
+  const h = harness([[row("O1","R1").e]]), input = new Element(), calendar = new Element();
+  let opened = false, clicks = 0;
+  input.focus = () => {};
+  input.dispatchEvent = e => { if (e.type === "focus") opened = true; };
+  input.onClick = () => { clicks++; opened = !opened; };
+  h.doc.selectors[".layui-laydate"] = () => opened ? [calendar] : [];
+  assert.equal(await h.api.openDateCalendar(input, "交易日期"), calendar);
+  assert.equal(clicks, 0);
+});
+test("restoring an earlier month navigates calendar and selects only the exact date", async () => {
+  const h = harness([[row("O1","R1").e]]), calendar = new Element(), panel = new Element();
+  let month = 10, selected = false;
+  const arrow = new Element(), cell = new Element("3");
+  cell.getAttribute = () => "2026-9-3";
+  cell.onClick = () => { selected = true; };
+  arrow.onClick = () => { month--; };
+  panel.selectors[".laydate-set-ym"] = () => [new Element("2026 年 " + month + " 月")];
+  panel.selectors[".laydate-prev-m"] = [arrow];
+  calendar.selectors[".layui-laydate-main"] = [panel];
+  calendar.selectors["td[lay-ymd]"] = () => month === 9 ? [cell] : [];
+  h.doc.selectors[".layui-laydate"] = [calendar];
+  await h.api.selectCalendarDate("2026-9-3");
+  assert.equal(month, 9);
+  assert.equal(selected, true);
+});
+test("ambiguous date cells fail instead of selecting the first", async () => {
+  const h = harness([[row("O1","R1").e]]), calendar = new Element();
+  const cells = [new Element("3"), new Element("3")];
+  cells.forEach(cell => { cell.getAttribute = () => "2026-10-3"; cell.onClick = () => { throw new Error("ambiguous date clicked"); }; });
+  calendar.selectors["td[lay-ymd]"] = cells;
+  h.doc.selectors[".layui-laydate"] = [calendar];
+  await assert.rejects(h.api.selectCalendarDate("2026-10-3"), /目标日期不唯一/);
 });
