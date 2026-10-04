@@ -28,6 +28,7 @@ class Element {
 }
 function harness(pages, detail = null) {
   let page = 1, opened = false, time = 0, listener;
+  const scheduled = [];
   const messages = [];
   const fixed = new Element("fixed clone", { "tbody tr": [new Element("wrong row")] });
   const header = new Element("", { "thead th": ["订单号", "参考号", "操作"].map(v => new Element(v)) });
@@ -46,14 +47,22 @@ function harness(pages, detail = null) {
     ".el-pagination": [pager], ".group-manager-container-float2.trade-in": () => opened && detail ? [detail] : [] });
   const context = {
     document: doc, Element, PIC_EXPERT_PAGE_CORE: pageCore, PIC_EXPERT_CORE: fileCore,
-    getComputedStyle: () => ({ display: "block", visibility: "visible" }),
+    getComputedStyle: e => ({ display: "block", visibility: "visible", ...e.style }),
     chrome: { runtime: { onMessage: { addListener: f => { listener = f; } },
       sendMessage: async message => { messages.push(message); return { ok: true }; } } },
     module: { exports: {} }, location: { href: "https://portal.test/app#/unsupported", origin: "https://portal.test", pathname: "/app" },
-    URL, Date: { now: () => time }, setTimeout: (fn, ms) => { time += ms; fn(); }
+    URL, Date: { now: () => time }, setTimeout: (fn, ms) => {
+      time += ms;
+      for (const item of scheduled.splice(0)) {
+        if (item.at <= time) item.fn(); else scheduled.push(item);
+      }
+      fn();
+    }
   };
   vm.runInNewContext(fs.readFileSync(require.resolve("../content.js"), "utf8"), context);
-  return { context, doc, api: context.module.exports, messages, open: () => { opened = true; }, probe: () => {
+  return { context, doc, api: context.module.exports, messages,
+    schedule: (ms, fn) => scheduled.push({at:time + ms, fn}), setPage: value => { page = value; },
+    open: () => { opened = true; }, probe: () => {
     let result; listener({type:"PIC_EXPERT_PROBE"}, {}, r => { result = r; }); return result;
   } };
 }
@@ -144,4 +153,103 @@ test("standalone return reselects the original dates and verifies the same order
   assert.equal(input.value, checkpoint.filters[0].value);
   assert.equal(queried, 1);
   await assert.rejects(h.api.restoreList({...checkpoint, signature:"O2::R2"}), /订单集合与原查询不同/);
+});
+
+test("pager changing before delayed rows does not skip the next page", async () => {
+  const pages = [[row("O1","R1").e, row("O2","R2").e], [row("O3","R3").e, row("O4","R4").e]];
+  const h = harness(pages), fresh = pages[1];
+  const next = h.doc.querySelector(".el-pagination").querySelector(".btn-next");
+  next.onClick = () => {
+    h.setPage(2); pages[1] = pages[0];
+    h.schedule(1800, () => { pages[1] = fresh; });
+  };
+  await h.api.run("T1");
+  assert.equal(h.messages.at(-1).status, "completed");
+  assert.deepEqual(h.messages.filter(m => m.type === "PIC_EXPERT_MANIFEST_ROW").map(m => m.row.orderNo), ["O1","O2","O3","O4"]);
+});
+test("unchanged rows after pager change fail rather than report completion", async () => {
+  const pages = [[row("O1","R1").e], [row("O2","R2").e]], h = harness(pages);
+  h.doc.querySelector(".el-pagination").querySelector(".btn-next").onClick = () => {
+    h.setPage(2); pages[1] = pages[0];
+  };
+  await h.api.run("T1");
+  assert.equal(h.messages.at(-1).status, "failed");
+  assert.match(h.messages.at(-1).error, /翻页/);
+});
+test("overlapping pages fail on duplicate identity even when signatures differ", async () => {
+  const h = harness([[row("O1","R1").e], [row("O1","R1").e, row("O2","R2").e]]);
+  await h.api.run("T1");
+  assert.equal(h.messages.at(-1).status, "failed");
+  assert.match(h.messages.at(-1).error, /重复订单/);
+});
+test("fixed-column detail control is matched by both identities", async () => {
+  const main = row("O1","R1",false), wrong = row("O1","R2",false), clone = row("O1","R1",false);
+  main.control.style.visibility = "hidden";
+  const h = harness([[main.e]], new Element("订单号 O1 商品信息"));
+  const fixed = h.api.currentTable().root.querySelector(".el-table__fixed-body-wrapper");
+  fixed.selectors["tbody tr"] = [wrong.e, clone.e];
+  let clicks = 0;
+  wrong.control.onClick = () => { throw new Error("wrong reference clicked"); };
+  clone.control.onClick = () => { clicks++; h.open(); };
+  await h.api.run("T1");
+  assert.equal(clicks, 1);
+  assert.match(h.messages.at(-1).error, /恢复原查询页面/);
+});
+test("ambiguous visible fixed-column controls fail safely", async () => {
+  const main = row("O1","R1",false);
+  main.control.style.visibility = "hidden";
+  const h = harness([[main.e]]);
+  h.api.currentTable().root.querySelector(".el-table__fixed-body-wrapper").selectors["tbody tr"] =
+    [row("O1","R1",false).e, row("O1","R1",false).e];
+  const result = await h.api.processRow(main.e, h.api.currentTable(), "T1");
+  assert.equal(result.reason, "详情入口不唯一");
+});
+test("visible main control takes precedence over its fixed clone", async () => {
+  const main = row("O1","R1",false), clone = row("O1","R1",false);
+  const h = harness([[main.e]], new Element("订单号 O1 商品信息"));
+  h.api.currentTable().root.querySelector(".el-table__fixed-body-wrapper").selectors["tbody tr"] = [clone.e];
+  let clicks = 0;
+  main.control.onClick = () => { clicks++; h.open(); };
+  clone.control.onClick = () => { throw new Error("clone should not be clicked"); };
+  await h.api.run("T1");
+  assert.equal(clicks, 1);
+});
+test("visible page numbers restore distant pages directly", async () => {
+  const h = harness(Array.from({length:8}, (_, i) => [row("O" + i,"R" + i).e]));
+  const pager = h.doc.querySelector(".el-pagination"), number = new Element("8");
+  let clicks = 0;
+  number.onClick = () => { clicks++; h.setPage(8); };
+  pager.selectors[".el-pager .number"] = [number];
+  pager.querySelector(".btn-next").onClick = () => { throw new Error("sequential paging used"); };
+  await h.api.goToPage(8);
+  assert.equal(clicks, 1);
+});
+test("jump input restores distant pages with native input and Enter", async () => {
+  const h = harness(Array.from({length:8}, (_, i) => [row("O" + i,"R" + i).e]));
+  const events = [];
+  class Input extends Element {
+    get value() { return this._value || ""; }
+    set value(v) { this._value = v; }
+    dispatchEvent(e) { events.push(e.type); if (e.type === "keyup" && e.keyCode === 13) h.setPage(Number(this.value)); }
+  }
+  h.context.HTMLInputElement = Input;
+  h.context.Event = class { constructor(type, args) { this.type = type; Object.assign(this, args); } };
+  h.context.KeyboardEvent = h.context.Event;
+  h.doc.querySelector(".el-pagination").selectors[".el-pagination__jump input"] = [new Input()];
+  await h.api.goToPage(8);
+  assert.deepEqual(events, ["input","change","keyup"]);
+});
+test("material modification in matching fixed clone skips the whole order", async () => {
+  const main = row("O1","R1",false), h = harness([[main.e]]);
+  h.api.currentTable().root.querySelector(".el-table__fixed-body-wrapper").selectors["tbody tr"] = [row("O1","R1",true).e];
+  const result = await h.api.processRow(main.e, h.api.currentTable(), "T1");
+  assert.equal(result.result, "跳过");
+  assert.equal(result.reason, "材料修改");
+});
+test("without jump controls page restoration safely supports forward and backward steps", async () => {
+  const h = harness([[row("O1","R1").e],[row("O2","R2").e],[row("O3","R3").e]]);
+  await h.api.goToPage(3);
+  assert.equal(h.api.currentTable().rows[0].textContent.startsWith("O3"), true);
+  await h.api.goToPage(1);
+  assert.equal(h.api.currentTable().rows[0].textContent.startsWith("O1"), true);
 });

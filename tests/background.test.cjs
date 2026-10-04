@@ -119,3 +119,58 @@ test("a stopped task is recoverable after worker restart during finalization", a
   assert.equal((await h.send({type:"PIC_EXPERT_TASK_STOP"},{})).task.status, "failed");
   assert.ok((await h.begin()).ok);
 });
+
+function interruptedTask(result = "失败") {
+  return {id:"T1", status:"running", tabId:7, frameId:4, scanned:1, completed:0, skipped:0, failed:1,
+    manifestRows:[{orderNo:"O1",referenceNo:"R1",result,reason:"页面中断",snFile:"",invoiceFile:""}],
+    downloads:{R1:{orderNo:"O1",status:"pending",files:{"SN码":{downloadId:1,filename:"pic-expert/T1/R1/SN码.jpg"}}}}};
+}
+test("worker recovery reconciles leftover files into an already recorded row and CSV", async () => {
+  const h = harness({failRemove:true}, interruptedTask());
+  await h.send({type:"PIC_EXPERT_TASK_STOP"},{});
+  const rows = h.task().manifestRows;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].snFile, "pic-expert/T1/R1/SN码.jpg");
+  assert.equal(rows[0].invoiceFile, "");
+  assert.equal(rows[0].result, "失败");
+  assert.match(rows[0].reason, /页面中断.*部分文件无法清理/);
+  assert.match(decodeURIComponent(h.calls[0].url), /pic-expert\/T1\/R1\/SN码.jpg/);
+  assert.equal(h.task().failed, 1);
+});
+test("rolled-back pair clears stale paths and success from an existing row", async () => {
+  const initial = interruptedTask("成功");
+  initial.manifestRows[0].snFile = "stale-path.jpg";
+  const h = harness({}, initial);
+  await h.send({type:"PIC_EXPERT_TASK_STOP"},{});
+  assert.equal(h.task().manifestRows[0].result, "失败");
+  assert.equal(h.task().manifestRows[0].snFile, "");
+  assert.equal(h.task().completed, 0);
+});
+test("complete files retain a separately recorded failure reason", async () => {
+  const initial = interruptedTask();
+  initial.downloads.R1.status = "complete";
+  const h = harness({}, initial);
+  await h.send({type:"PIC_EXPERT_TASK_STOP"},{});
+  assert.equal(h.task().manifestRows[0].result, "失败");
+  assert.equal(h.task().manifestRows[0].reason, "页面中断");
+  assert.match(h.task().manifestRows[0].snFile, /SN码.jpg$/);
+});
+test("retry clears obsolete CSV error when native download already completed", async () => {
+  const h = harness({failManifest:true}), {task} = await h.begin();
+  await h.send({type:"PIC_EXPERT_TASK_END",taskId:task.id,status:"completed"});
+  h.items.get(h.task().manifestDownloadId).state = "complete";
+  const response = await h.send({type:"PIC_EXPERT_MANIFEST_RETRY"},{});
+  assert.equal(response.task.manifestError, "");
+  assert.equal(h.task().manifestError, "");
+  assert.equal(h.calls.length, 1);
+});
+test("retry waits for in-progress CSV and clears persisted error on completion", async () => {
+  const h = harness({failManifest:true}), {task} = await h.begin();
+  await h.send({type:"PIC_EXPERT_TASK_END",taskId:task.id,status:"completed"});
+  const item = h.items.get(h.task().manifestDownloadId);
+  item.state = "in_progress";
+  setImmediate(() => { item.state = "complete"; });
+  const response = await h.send({type:"PIC_EXPERT_MANIFEST_RETRY"},{});
+  assert.equal(response.task.manifestError, "");
+  assert.equal(h.calls.length, 1);
+});

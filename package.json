@@ -1,6 +1,6 @@
 {
   "name": "pic-expert",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "scripts": {
     "check": "node --check background.js && node --check content.js && node --check core.js && node --check page-core.js && node --check popup.js",
