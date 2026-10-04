@@ -128,24 +128,65 @@
     // The route may render the input before laydate binds its focus/click handler.
     let nextAttempt = 0, attempts = 0;
     await log("日期控件", "等待初始化并打开：" + label);
-    const calendar = await wait(() => {
+    const findCalendar = () => {
       const calendars = all(".layui-laydate");
       if (calendars.length > 1) throw new Error("日期控件不唯一，已停止。");
-      if (calendars.length === 1) return calendars[0];
+      return calendars[0] || null;
+    };
+    const calendar = await wait(() => {
+      const existing = findCalendar();
+      if (existing) return existing;
       if (Date.now() >= nextAttempt) {
-        input.blur?.();
-        input.focus?.();
-        input.click();
         attempts += 1;
         nextAttempt = Date.now() + 1000;
+        input.blur?.();
+        input.focus?.();
+        // Focus may already open the calendar. A following click can toggle it shut.
+        let opened = findCalendar();
+        if (opened) return opened;
+        input.dispatchEvent(new Event("focus"));
+        opened = findCalendar();
+        if (opened) return opened;
+        input.click();
+        return findCalendar();
       }
       return false;
     }, "原日期控件未打开（已重试聚焦和点击，请查看运行日志）。").catch(async error => {
-      await log("日期控件", error.message + "，尝试 " + attempts + " 次", "error");
+      await log("日期控件", error.message + " 尝试 " + attempts + " 次；日历节点 " +
+        document.querySelectorAll(".layui-laydate").length + "，可见 " + all(".layui-laydate").length +
+        "；输入连接 " + input.isConnected + "，禁用 " + input.disabled + "，只读 " + input.readOnly, "error");
       throw error;
     });
     await log("日期控件", "已打开，尝试 " + attempts + " 次");
     return calendar;
+  };
+  const selectCalendarDate = async date => {
+    const [year, month] = date.split("-").map(Number), target = year * 12 + month;
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      const calendars = all(".layui-laydate");
+      if (calendars.length !== 1) throw new Error("日期控件消失或不唯一。");
+      const calendar = calendars[0];
+      const cells = all("td[lay-ymd]", calendar).filter(e => e.getAttribute("lay-ymd") === date &&
+        !["laydate-disabled", "laydate-day-prev", "laydate-day-next"].some(cls => e.classList.contains(cls)));
+      if (cells.length === 1) { cells[0].click(); await sleep(200); return; }
+      if (cells.length > 1) throw new Error("目标日期不唯一。");
+      const panels = all(".layui-laydate-main", calendar).map(panel => {
+        const match = clean(panel.querySelector(".laydate-set-ym")?.textContent).match(/(\d{4})\s*年\s*(\d{1,2})\s*月/);
+        return match ? { panel, month: Number(match[1]) * 12 + Number(match[2]) } : null;
+      }).filter(Boolean);
+      if (!panels.length || attempt === 24) throw new Error("原日期范围无法恢复。");
+      const before = panels.map(p => p.month).join(",");
+      const previous = target < panels[0].month;
+      if (!previous && target <= panels.at(-1).month) throw new Error("原日期不可选，已停止。");
+      const panel = previous ? panels[0].panel : panels.at(-1).panel;
+      const arrows = all(previous ? ".laydate-prev-m" : ".laydate-next-m", panel).filter(e => !e.classList.contains("laydate-disabled"));
+      if (arrows.length !== 1) throw new Error("日期月份切换入口不唯一。");
+      arrows[0].click();
+      await wait(() => all(".layui-laydate-main", calendar).map(p => {
+        const match = clean(p.querySelector(".laydate-set-ym")?.textContent).match(/(\d{4})\s*年\s*(\d{1,2})\s*月/);
+        return match ? Number(match[1]) * 12 + Number(match[2]) : "";
+      }).join(",") !== before, "日期月份没有更新。");
+    }
   };
   const restoreList = async checkpoint => {
     await log("返回列表", "恢复原查询路由，目标页 " + checkpoint.page);
@@ -162,16 +203,17 @@
       const label = clean(items[i].querySelector("label")?.textContent || items[i].firstChild?.textContent);
       if (label !== saved.label) throw new Error("查询字段顺序发生变化。");
       if (saved.date && saved.value) {
-        setInput(input, saved.value);
-        const calendar = await openDateCalendar(input, label);
+        await openDateCalendar(input, label);
         for (const date of CORE.dateRange(saved.value)) {
-          const cells = all("td[lay-ymd]", calendar).filter(e => e.getAttribute("lay-ymd") === date && !e.classList.contains("laydate-disabled"));
-          if (!cells.length) throw new Error("原日期范围无法恢复。");
-          cells[0].click();
+          await selectCalendarDate(date);
         }
+        const calendars = all(".layui-laydate");
+        if (calendars.length !== 1) throw new Error("日期控件消失或不唯一。");
+        const calendar = calendars[0];
         const confirm = all(".laydate-btns-confirm", calendar);
-        if (confirm.length !== 1) throw new Error("日期确认控件不唯一。");
+        if (confirm.length !== 1 || confirm[0].classList.contains("laydate-disabled")) throw new Error("日期确认控件不可用或不唯一。");
         confirm[0].click();
+        await wait(() => input.value === saved.value, "日期控件确认后未恢复原日期范围。");
         await log("日期控件", "已选择并确认原日期范围");
       } else if (saved.readonly && input.value !== saved.value) {
         input.click();
@@ -354,5 +396,5 @@
     return false;
   });
   // Exposed only by Node's test harness; not installed on the page's MAIN world.
-  if (typeof module !== "undefined" && module.exports) module.exports = { currentTable, findAssets, detailScope, run, processRow, restoreList, goToPage, openDateCalendar };
+  if (typeof module !== "undefined" && module.exports) module.exports = { currentTable, findAssets, detailScope, run, processRow, restoreList, goToPage, openDateCalendar, selectCalendarDate };
 })();
