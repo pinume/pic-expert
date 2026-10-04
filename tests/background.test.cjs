@@ -47,7 +47,7 @@ function harness(options = {}, initial = null) {
     chrome, importScripts() {}, PIC_EXPERT_CORE: core, PIC_EXPERT_STORE: store, setTimeout, clearTimeout, Date, Map
   });
   const send = (message, source = sender) => new Promise(resolve => listener(message, source, resolve));
-  const begin = () => send({ type: "PIC_EXPERT_TASK_BEGIN", tabId: 7, frameId: 4, sourceUrl: "https://example.test" }, {});
+  const begin = () => send({ type: "PIC_EXPERT_TASK_BEGIN", tabId: 7, frameId: 4 }, {});
   const pair = taskId => send({ type: "PIC_EXPERT_DOWNLOAD_PAIR", taskId, orderNo: "O1", referenceNo: "R1", assets });
   return { send, begin, pair, calls, removed, items, store, notify, handlers, task: () => store.snapshot() };
 }
