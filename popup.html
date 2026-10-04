@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Pic Expert</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <h1>Pic Expert</h1>
+    <p class="hint">先在订单页面完成登录、日期选择和查询，再开始下载当前查询结果的全部分页。</p>
+    <button id="start" type="button">开始下载</button>
+    <section aria-live="polite">
+      <div id="status">未开始</div>
+      <div id="progress"></div>
+      <div id="error" role="alert"></div>
+    </section>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
