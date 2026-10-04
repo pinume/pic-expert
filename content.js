@@ -9,6 +9,11 @@
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const all = (selector, scope = document) => [...scope.querySelectorAll(selector)].filter(visible);
   let running = false, stopped = false;
+  let activeTaskId = null;
+  const log = async (stage, message, level = "info") => {
+    console[level === "error" ? "error" : "info"]?.("[Pic Expert] " + stage + "：" + message);
+    if (activeTaskId) await chrome.runtime.sendMessage({ type: "PIC_EXPERT_LOG", taskId: activeTaskId, stage, message, level }).catch(() => {});
+  };
   const checkedSend = async message => {
     const response = await chrome.runtime.sendMessage(message);
     if (!response?.ok) {
@@ -80,13 +85,16 @@
     const previousSignature = signature();
     const button = before.scope.querySelector(direction > 0 ? ".btn-next" : ".btn-prev");
     if (disabled(button)) return false;
+    await log("翻页", before.page + " → " + (before.page + direction));
     button.click();
     await waitPage(before.page + direction, before.total, previousSignature);
+    await log("翻页", "目标页订单集合已确认");
     return true;
   };
   const goToPage = async target => {
     const before = pager();
     if (before.page === target) return;
+    await log("恢复页码", before.page + " → " + target);
     const previousSignature = signature();
     const numbers = all(".el-pager .number", before.scope).filter(e => Number(e.textContent) === target);
     const jump = all(".el-pagination__jump input", before.scope);
@@ -116,7 +124,31 @@
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
   };
+  const openDateCalendar = async (input, label) => {
+    // The route may render the input before laydate binds its focus/click handler.
+    let nextAttempt = 0, attempts = 0;
+    await log("日期控件", "等待初始化并打开：" + label);
+    const calendar = await wait(() => {
+      const calendars = all(".layui-laydate");
+      if (calendars.length > 1) throw new Error("日期控件不唯一，已停止。");
+      if (calendars.length === 1) return calendars[0];
+      if (Date.now() >= nextAttempt) {
+        input.blur?.();
+        input.focus?.();
+        input.click();
+        attempts += 1;
+        nextAttempt = Date.now() + 1000;
+      }
+      return false;
+    }, "原日期控件未打开（已重试聚焦和点击，请查看运行日志）。").catch(async error => {
+      await log("日期控件", error.message + "，尝试 " + attempts + " 次", "error");
+      throw error;
+    });
+    await log("日期控件", "已打开，尝试 " + attempts + " 次");
+    return calendar;
+  };
   const restoreList = async checkpoint => {
+    await log("返回列表", "恢复原查询路由，目标页 " + checkpoint.page);
     const destination = new URL(checkpoint.url);
     if (destination.origin !== location.origin || destination.pathname !== location.pathname ||
       destination.hash.split("?")[0] !== "#/auditOfTrade2026") throw new Error("无法安全恢复原查询页面。");
@@ -131,8 +163,7 @@
       if (label !== saved.label) throw new Error("查询字段顺序发生变化。");
       if (saved.date && saved.value) {
         setInput(input, saved.value);
-        input.click();
-        const calendar = await wait(() => all(".layui-laydate")[0], "原日期控件未打开。");
+        const calendar = await openDateCalendar(input, label);
         for (const date of CORE.dateRange(saved.value)) {
           const cells = all("td[lay-ymd]", calendar).filter(e => e.getAttribute("lay-ymd") === date && !e.classList.contains("laydate-disabled"));
           if (!cells.length) throw new Error("原日期范围无法恢复。");
@@ -141,6 +172,7 @@
         const confirm = all(".laydate-btns-confirm", calendar);
         if (confirm.length !== 1) throw new Error("日期确认控件不唯一。");
         confirm[0].click();
+        await log("日期控件", "已选择并确认原日期范围");
       } else if (saved.readonly && input.value !== saved.value) {
         input.click();
         for (const part of saved.value.split(/\s*\/\s*/)) {
@@ -155,10 +187,12 @@
     }
     const query = all("button").filter(e => clean(e.textContent) === "查询");
     if (query.length !== 1) throw new Error("查询入口不唯一。");
+    await log("恢复查询", "条件已核对，执行原查询");
     query[0].click();
     await wait(() => !loading() && currentTable() && pager().total === checkpoint.total, "原查询结果没有恢复。");
     await goToPage(checkpoint.page);
     if (pager().page !== checkpoint.page || signature() !== checkpoint.signature) throw new Error("恢复后的订单集合与原查询不同，已停止。");
+    await log("返回列表", "原页码和订单集合已确认");
   };
   const findAssets = scope => {
     const result = {};
@@ -223,8 +257,10 @@
     const controls = mainControls.length ? mainControls : [...new Set(clones.flatMap(rowControls))];
     if (controls.length !== 1) return { ...empty, result: "失败", reason: "详情入口不唯一" };
     const checkpoint = snapshot();
+    await log("打开详情", "订单 " + id.orderNo + "，参考号 " + id.referenceNo);
     controls[0].click();
     const detail = await wait(() => detailScope(id.orderNo), "详情未打开或订单身份不匹配。");
+    await log("打开详情", "订单身份已确认");
     let result;
     try {
       // Wait for detail data and image rendering; DOM absence immediately after navigation is not missing data.
@@ -241,6 +277,7 @@
         result = { ...empty, result: "跳过", reason: "SN码或发票图片缺失、未加载或不唯一" };
       } else {
         const prepared = { "SN码": await prepareAsset(assets["SN码"]), "发票": await prepareAsset(assets["发票"]) };
+        await log("配对下载", "两张图片已读取并验证格式");
         const downloaded = await checkedSend({ type: "PIC_EXPERT_DOWNLOAD_PAIR", taskId, ...id, assets: prepared });
         result = { ...id, result: "成功", reason: "", snFile: downloaded.files["SN码"].filename, invoiceFile: downloaded.files["发票"].filename };
       }
@@ -255,9 +292,11 @@
     return result;
   };
   const run = async taskId => {
+    activeTaskId = taskId;
     let scanned = 0, completed = 0, skipped = 0, failed = 0, visited = 0;
     const seen = new Set();
     try {
+      await log("任务启动", "开始扫描当前查询全部分页");
       await goToPage(1);
       const initial = snapshot();
       const total = initial.total;
@@ -297,8 +336,9 @@
       if (visited !== total) throw new Error("扫描条数与查询总条数不一致，已停止。");
       await checkedSend({ type: "PIC_EXPERT_TASK_END", taskId, status: "completed" });
     } catch (error) {
+      await log("任务中断", error.message, "error");
       await chrome.runtime.sendMessage({ type: "PIC_EXPERT_TASK_END", taskId, status: "failed", error: error.message }).catch(() => {});
-    } finally { running = false; }
+    } finally { running = false; activeTaskId = null; }
   };
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "PIC_EXPERT_PROBE") {
@@ -314,5 +354,5 @@
     return false;
   });
   // Exposed only by Node's test harness; not installed on the page's MAIN world.
-  if (typeof module !== "undefined" && module.exports) module.exports = { currentTable, findAssets, detailScope, run, processRow, restoreList, goToPage };
+  if (typeof module !== "undefined" && module.exports) module.exports = { currentTable, findAssets, detailScope, run, processRow, restoreList, goToPage, openDateCalendar };
 })();

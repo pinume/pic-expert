@@ -18,6 +18,12 @@
       <div id="progress"></div>
       <div id="error" role="alert"></div>
     </section>
+    <details>
+      <summary>运行日志（最近 500 条）</summary>
+      <textarea id="logs" rows="12" readonly aria-label="运行日志"></textarea>
+      <button id="copy-logs" type="button" disabled>复制日志</button>
+      <span id="copy-status" role="status"></span>
+    </details>
   </main>
   <script src="page-core.js"></script>
   <script src="popup.js"></script>

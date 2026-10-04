@@ -174,3 +174,30 @@ test("retry waits for in-progress CSV and clears persisted error on completion",
   assert.equal(response.task.manifestError, "");
   assert.equal(h.calls.length, 1);
 });
+test("task logs survive worker restart and are bounded to the latest 500 entries", async () => {
+  const h = harness(), {task} = await h.begin();
+  for (let i = 0; i < 505; i++) {
+    assert.ok((await h.send({type:"PIC_EXPERT_LOG",taskId:task.id,stage:"日期控件",message:String(i)})).ok);
+  }
+  const saved = h.task(), restarted = harness({}, saved);
+  const current = (await restarted.send({type:"PIC_EXPERT_TASK_STATE"},{})).task;
+  assert.equal(current.logs.length, 500);
+  assert.equal(current.logs[0].message, "5");
+  assert.equal(current.logs.at(-1).message, "504");
+  assert.ok(current.logs.every(entry => !Number.isNaN(Date.parse(entry.time))));
+});
+test("diagnostic log messages reject wrong task and frame", async () => {
+  const h = harness(), {task} = await h.begin(), before = h.task().logs.length;
+  assert.equal((await h.send({type:"PIC_EXPERT_LOG",taskId:"old",message:"invalid"})).ok, false);
+  assert.equal((await h.send({type:"PIC_EXPERT_LOG",taskId:task.id,message:"invalid"},{tab:{id:7},frameId:0})).ok, false);
+  assert.equal(h.task().logs.length, before);
+});
+test("paired downloads and CSV completion are persisted in task logs", async () => {
+  const h = harness(), {task} = await h.begin();
+  await h.pair(task.id);
+  await h.send({type:"PIC_EXPERT_TASK_END",taskId:task.id,status:"completed"});
+  const logs = h.task().logs;
+  assert.equal(logs.filter(entry => entry.stage === "下载图片").length, 2);
+  assert.ok(logs.some(entry => entry.stage === "配对完成"));
+  assert.ok(logs.some(entry => entry.stage === "下载清单" && entry.message.includes("清单已下载")));
+});
