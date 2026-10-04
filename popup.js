@@ -4,6 +4,9 @@ const retryButton = document.querySelector("#retry");
 const statusElement = document.querySelector("#status");
 const progressElement = document.querySelector("#progress");
 const errorElement = document.querySelector("#error");
+const logsElement = document.querySelector("#logs");
+const copyLogsButton = document.querySelector("#copy-logs");
+const copyStatusElement = document.querySelector("#copy-status");
 const request = async message => {
   const response = await chrome.runtime.sendMessage(message);
   if (!response?.ok) throw new Error(response?.error || "后台无响应。");
@@ -18,6 +21,13 @@ const renderTask = task => {
   startButton.disabled = ["running", "stopping", "finalizing"].includes(task?.status);
   stopButton.hidden = !["running", "stopping", "finalizing"].includes(task?.status);
   retryButton.hidden = !task?.manifestError;
+  const logText = (task?.logs || []).map(entry => new Date(entry.time).toLocaleString("zh-CN", { hour12: false }) +
+    " [" + entry.level + "] " + entry.stage + "：" + entry.message).join("\n");
+  if (logsElement.value !== logText) {
+    logsElement.value = logText;
+    logsElement.scrollTop = logsElement.scrollHeight;
+  }
+  copyLogsButton.disabled = !logText;
 };
 const refresh = async () => {
   try { renderTask((await request({ type: "PIC_EXPERT_TASK_STATE" })).task); }
@@ -60,6 +70,16 @@ retryButton.addEventListener("click", async () => {
   try { renderTask((await request({ type: "PIC_EXPERT_MANIFEST_RETRY" })).task); }
   catch (error) { errorElement.textContent = error.message; }
   finally { retryButton.disabled = false; }
+});
+copyLogsButton.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(logsElement.value);
+    copyStatusElement.textContent = "已复制";
+  } catch {
+    logsElement.focus();
+    logsElement.select();
+    copyStatusElement.textContent = document.execCommand("copy") ? "已复制" : "请手动复制已选中的日志";
+  }
 });
 refresh();
 const pollTimer = setInterval(refresh, 1000);

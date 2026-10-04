@@ -6,6 +6,12 @@ const endings = new Map();
 let stateQueue = Promise.resolve();
 const getTask = async () => (await chrome.storage.local.get(TASK_KEY))[TASK_KEY] || null;
 const saveTask = task => chrome.storage.local.set({ [TASK_KEY]: task });
+const appendLog = (task, stage, message, level = "info") => {
+  task.logs ||= [];
+  task.logs.push({ time: new Date().toISOString(), level: level === "error" ? "error" : "info",
+    stage: String(stage || "任务").slice(0, 80), message: String(message || "").slice(0, 500) });
+  task.logs = task.logs.slice(-500);
+};
 const mutate = operation => {
   const promise = stateQueue.then(operation);
   stateQueue = promise.catch(() => {});
@@ -39,6 +45,7 @@ const startTask = message => mutate(async () => {
   const task = { id: makeTaskId(), status: "running", tabId: message.tabId, frameId: message.frameId,
     sourceUrl: message.sourceUrl, startedAt: new Date().toISOString(), page: 1,
     scanned: 0, completed: 0, skipped: 0, failed: 0, manifestRows: [], downloads: {} };
+  appendLog(task, "创建任务", "任务 " + task.id + "，frame " + task.frameId);
   await saveTask(task);
   return task;
 });
@@ -85,10 +92,16 @@ const downloadPair = async (message, sender) => {
         const downloadId = existing?.downloadId ?? await chrome.downloads.download({
           url: assets[kind].url, filename, saveAs: false, conflictAction: "overwrite"
         });
-        await patchTask(taskId, sender, t => { t.downloads[referenceNo].files[kind] = { downloadId, filename }; }, false);
+        await patchTask(taskId, sender, t => {
+          t.downloads[referenceNo].files[kind] = { downloadId, filename };
+          appendLog(t, "下载图片", kind + "，编号 " + downloadId + "，路径 " + filename);
+        }, false);
         await waitForDownload(downloadId, 120000, taskId);
       }
-      task = await patchTask(taskId, sender, t => { t.downloads[referenceNo].status = "complete"; });
+      task = await patchTask(taskId, sender, t => {
+        t.downloads[referenceNo].status = "complete";
+        appendLog(t, "配对完成", "参考号 " + referenceNo + "，两张图片下载完成");
+      });
       return task.downloads[referenceNo].files;
     } catch (error) {
       // Remove only this pair's files; retain paths when rollback fails.
@@ -105,6 +118,7 @@ const downloadPair = async (message, sender) => {
         const reason = error.message + (Object.keys(leftovers).length ? "；部分文件无法清理，请查看清单路径。" : "");
         await patchTask(taskId, sender, t => {
           t.downloads[referenceNo] = { orderNo, status: "failed", files: leftovers, error: reason };
+          appendLog(t, "下载回滚", "参考号 " + referenceNo + "：" + reason, "error");
         }, false);
         const failure = new Error(reason);
         failure.files = leftovers;
@@ -125,6 +139,7 @@ const finalizeTask = (message, sender) => {
       t.status = "finalizing";
       t.finalStatus = message.status === "completed" ? "completed" : "failed";
       t.error = message.error || t.error || "";
+      appendLog(t, "结束任务", t.finalStatus + (t.error ? "：" + t.error : ""), t.finalStatus === "failed" ? "error" : "info");
     }, false);
     if (!task.finishedAt) {
       await Promise.allSettled([...pairs.entries()].filter(([key]) => key.startsWith(taskId + "::")).map(([, promise]) => promise));
@@ -141,6 +156,7 @@ const finalizeTask = (message, sender) => {
           await patchTask(taskId, sender, t => {
             t.downloads[referenceNo] = { ...pair, status: "failed", files: leftovers,
               error: "任务中断。" + (Object.keys(leftovers).length ? "部分文件无法清理，请查看清单路径。" : "") };
+            appendLog(t, "恢复下载", "参考号 " + referenceNo + "：" + t.downloads[referenceNo].error, "error");
           }, false);
         }
       }
@@ -186,9 +202,12 @@ const finalizeTask = (message, sender) => {
       });
       task = await patchTask(taskId, sender, t => { t.manifestDownloadId = downloadId; t.manifestFilename = filename; }, false);
       await waitForDownload(downloadId);
-      task = await patchTask(taskId, sender, t => { t.manifestError = ""; }, false);
+      task = await patchTask(taskId, sender, t => { t.manifestError = ""; appendLog(t, "下载清单", "清单已下载：" + filename); }, false);
     } catch (error) {
-      task = await patchTask(taskId, sender, t => { t.manifestError = "清单下载失败：" + error.message; }, false);
+      task = await patchTask(taskId, sender, t => {
+        t.manifestError = "清单下载失败：" + error.message;
+        appendLog(t, "下载清单", t.manifestError, "error");
+      }, false);
     }
     return settle();
   })().finally(() => endings.delete(taskId));
@@ -199,14 +218,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     switch (message?.type) {
       case "PIC_EXPERT_TASK_BEGIN": return { ok: true, task: await startTask(message) };
+      case "PIC_EXPERT_LOG":
+        await patchTask(message.taskId, sender, t => { appendLog(t, message.stage, message.message, message.level); }, false);
+        return { ok: true };
       case "PIC_EXPERT_DOWNLOAD_PAIR": return { ok: true, files: await downloadPair(message, sender) };
       case "PIC_EXPERT_ROW_BEGIN":
-        return { ok: true, task: await patchTask(message.taskId, sender, t => { t.currentRow = message.identity; }) };
+        return { ok: true, task: await patchTask(message.taskId, sender, t => {
+          t.currentRow = message.identity;
+          appendLog(t, "检查订单", "订单 " + message.identity.orderNo + "，参考号 " + message.identity.referenceNo);
+        }) };
       case "PIC_EXPERT_MANIFEST_ROW":
         return { ok: true, task: await patchTask(message.taskId, sender, t => {
           const key = r => r.orderNo + "::" + r.referenceNo;
           const index = t.manifestRows.findIndex(r => key(r) === key(message.row));
           if (index < 0) t.manifestRows.push(message.row); else t.manifestRows[index] = message.row;
+          if (index < 0) appendLog(t, "订单结果", message.row.result + (message.row.reason ? "：" + message.row.reason : ""), message.row.result === "失败" ? "error" : "info");
           if (t.currentRow && key(t.currentRow) === key(message.row)) delete t.currentRow;
         }) };
       case "PIC_EXPERT_PROGRESS":

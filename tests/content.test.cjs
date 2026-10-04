@@ -253,3 +253,34 @@ test("without jump controls page restoration safely supports forward and backwar
   await h.api.goToPage(1);
   assert.equal(h.api.currentTable().rows[0].textContent.startsWith("O1"), true);
 });
+test("date calendar opens via focus after its handler initializes late", async () => {
+  const h = harness([[row("O1","R1").e]]), input = new Element(), calendar = new Element();
+  let bound = false, opened = false, focuses = 0;
+  input.focus = () => { focuses++; if (bound) opened = true; };
+  input.blur = () => {};
+  h.schedule(1800, () => { bound = true; });
+  h.doc.selectors[".layui-laydate"] = () => opened ? [calendar] : [];
+  assert.equal(await h.api.openDateCalendar(input, "交易日期"), calendar);
+  assert.ok(focuses >= 3);
+});
+test("date calendar times out safely and does not query when unavailable", async () => {
+  const h = harness([[row("O1","R1").e]]), input = new Element();
+  let clicks = 0;
+  input.onClick = () => { clicks++; };
+  await assert.rejects(h.api.openDateCalendar(input, "交易日期"), /原日期控件未打开/);
+  assert.equal(clicks, 15);
+});
+test("multiple visible date calendars fail without choosing one", async () => {
+  const h = harness([[row("O1","R1").e]]);
+  h.doc.selectors[".layui-laydate"] = [new Element(),new Element()];
+  await assert.rejects(h.api.openDateCalendar(new Element(), "交易日期"), /日期控件不唯一/);
+});
+test("task failure emits a diagnostic stage before finalizing", async () => {
+  const h = harness([[row("O1","R1",false).e]], null);
+  await h.api.run("T1");
+  const entries = h.messages.filter(m => m.type === "PIC_EXPERT_LOG");
+  assert.ok(entries.some(m => m.stage === "打开详情"));
+  assert.equal(entries.at(-1).stage, "任务中断");
+  assert.equal(entries.at(-1).level, "error");
+  assert.equal(entries.at(-1).message, h.messages.at(-1).error);
+});
