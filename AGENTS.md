@@ -1,36 +1,45 @@
 # AGENTS.md
 
-**优先级**：用户明确要求 > 项目规范/仓库指令 > 现有行为与架构 > 本规范。
+Priority: Explicit user requests > Project rules/repository instructions > Existing behavior and architecture > This specification.
 
-## 原则
+## Principles
 
-- **复用优先**：先用现有模块和浏览器原生能力；新增依赖前先查 Web/Chrome 原生 API。
-- **删除优于兼容**：内部和私有接口重构时直接删旧实现，不留 shim、双读双写、新旧分支。仅真实外部契约才评估迁移。
-- **零运行时依赖**：除非需求明确需要，否则保持原生 JavaScript + Manifest V3。
-- **安全失败**：无法唯一识别订单、参考号、详情、图片或分页状态时停止或跳过，不猜测、不下载半套资料。
+- **Reuse first**: Use existing modules and dependencies first. Check the standard library before you add new dependencies.
+- **Deletion over compatibility**: Delete old implementations directly during internal and private interface refactoring. Do not keep shims, dual-read/dual-write paths, or legacy branches. Evaluate migration paths only for real external contracts (public APIs, persistent data formats, cross-team interfaces).
 
-## 流程
+## Workflow
 
-**轻量任务**（仅文档、注释、拼写、格式，不影响运行行为）：核对 diff 后完成，可跳过下面的流程。
+Lightweight tasks (documentation, comments, typos, formatting only; no runtime behavior change): Verify the diff and complete. You can skip the steps below.
 
-1. **分析**：确认需求、现状、依赖、运行时版本、约束与风险。
-2. **设计**：先明确数据流、任务身份、页面状态机、失败与恢复边界，再写代码。
-3. **审查设计**：检查是否存在重复下载、错订单、错分页、半套资料、后台脚本重入等风险。
-4. **实现**：保持模块边界清晰，优先纯函数和可测试状态转换。
-5. **真实验证**：先跑静态检查和自动化测试；能做真实 Chrome E2E 时优先 E2E，不能做时必须明确说明未验证部分。
-6. **代码审查**：核对 diff、权限、异常路径、重复请求、任务身份和下载路径。
-7. **闭环**：汇报实际验证证据、已知限制和最终提交。
+1. **Analysis**: Analyze requirements, current state, dependencies, runtime versions, constraints, and risks.
+2. **Design**: Use `andrej-karpathy-skills:karpathy-guidelines` to define the minimal plan and verifiable success criteria.
+3. **Pre-implementation review**: Review the plan with `ponytail:ponytail` before you write code.
+4. **Implementation**: Follow the plan strictly. Do not expand the scope.
+5. **Build and verification**:
+   - **Prefer E2E verification**: Use real entry points and real data flows. Assert that final results and side effects are completely correct.
+   - **Reject useless unit tests**: Do not write unit tests for coverage metrics. Add isolated tests only when you cannot reasonably verify critical behaviors through E2E tests.
+   - **Bug fix sequence**: Reproduce bugs through real entry points before you change code. When you cannot reproduce bugs reliably, record symptoms, evidence, and expected behavior. Verify fixes in the scenario closest to reality.
+   - **Risk checks**: Check boundary values, invalid inputs, I/O and dependency failures, data consistency, repeated execution, and recovery capabilities.
+6. **Code review**: Review the final diff with `ponytail:ponytail-review`. Run `ponytail:ponytail-audit` when you need a repository-wide scan.
+7. **Closed loop**: Fix, build, verify, and review until you meet all criteria or find an explicit blocker.
 
-## E2E 重点
+## Completion Criteria
 
-- 当前查询全部分页都被处理，不能只处理第一页。
-- 扩展不得选择、调整日期或点击查询，包括详情返回后的恢复阶段；仅处理用户已经查询的结果。
-- 证明材料图一、二、三有图片时按原标签下载，无图片时跳过；运行日志记录各自路径。
-- “材料修改”必须跳过。
-- SN 码或发票任一缺失必须整笔跳过。
-- 一个参考号只生成一套 `SN码` + `发票`。
-- 下载失败不得把该订单记为成功。
-- 重复消息不得重复下载同一资料。
-- 每次任务只生成一份汇总下载清单，仅包含订单号、参考号、处理结果、原因四列。
-- 暂停继续必须沿用任务目录并核对原查询和断点页；已成功且文件仍存在的资料不得重复下载。
-- 单次日志或进度更新不得重写全部订单；订单结果与统计应原子保存。
+Meet all applicable items:
+
+1. Changes match the requirements. No unrelated modifications exist.
+2. The project builds and runs normally. All existing valid tests continue to pass.
+3. Verification via real entry points and high-risk scenarios passes. Business results are correct (do not only verify process survival or zero exit codes).
+4. You completed final code reviews. You resolved all issues and re-verified as needed.
+5. Base all conclusions on real execution evidence, not assumptions.
+
+## Reporting
+
+Provide a brief summary upon completion:
+
+1. What you changed;
+2. Actual build, test, verification, and review steps you executed, with results (specify skill name or manual inspection);
+3. Unresolved issues, limitations, or skipped verification steps (write "None" if there are none).
+
+Writing style follows ASD-STE100 (approx. 80%): Use short sentences. One topic per sentence. Use active voice. Keep terminology consistent. Do not use ambiguous words. Use numbered lists for procedural steps, with one action per step.
+
