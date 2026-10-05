@@ -3,13 +3,10 @@
   globalThis.__PIC_EXPERT_CONTENT_INSTALLED__ = true;
   const CORE = globalThis.PIC_EXPERT_PAGE_CORE;
   const FILES = globalThis.PIC_EXPERT_CORE;
+  const SITE = globalThis.PIC_EXPERT_SITE_API;
   const clean = value => String(value ?? "").replace(/\s+/g, " ").trim();
-  const visible = e => e instanceof Element && e.getClientRects().length > 0 &&
-    getComputedStyle(e).display !== "none" && getComputedStyle(e).visibility !== "hidden";
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-  const all = (selector, scope = document) => [...scope.querySelectorAll(selector)].filter(visible);
-  let running = false, stopped = false, pauseRequested = false;
-  let activeTaskId = null;
+  let running = false, stopped = false, pauseRequested = false, activeTaskId = null;
   const log = async (stage, message, level = "info") => {
     console[level === "error" ? "error" : "info"]?.("[Pic Expert] " + stage + "：" + message);
     if (activeTaskId) await chrome.runtime.sendMessage({ type: "PIC_EXPERT_LOG", taskId: activeTaskId, stage, message, level }).catch(() => {});
@@ -33,133 +30,15 @@
     }
     throw new Error(reason);
   };
-  const currentTable = () => {
-    const tables = [
-      ...all(".el-table").map(root => ({
-        root, header: root.querySelector(".el-table__header-wrapper"),
-        body: root.querySelector(".el-table__body-wrapper")
-      })),
-      ...all("table").filter(t => !t.closest(".el-table")).map(t => ({ root: t, header: t, body: t }))
-    ].filter(t => t.header && t.body).map(t => {
-      const headers = [...t.header.querySelectorAll("thead th")].map(e => clean(e.textContent));
-      const columns = CORE.inferColumns(headers);
-      const rows = all("tbody tr", t.body).filter(r => r.querySelectorAll("td").length);
-      return { ...t, columns, rows };
-    }).filter(t => t.rows.length && Object.values(t.columns).every(i => i >= 0));
-    return tables.length === 1 ? tables[0] : null;
-  };
-  const identity = (row, columns) => {
-    const cells = [...row.querySelectorAll("td")];
-    return { orderNo: clean(cells[columns.orderNo]?.textContent), referenceNo: clean(cells[columns.referenceNo]?.textContent) };
-  };
-  const key = value => value.orderNo + "::" + value.referenceNo;
-  const signature = (table = currentTable()) =>
-    table ? table.rows.map(r => key(identity(r, table.columns))).join("\n") : "";
-  const loading = () => all(".el-loading-mask").length > 0;
-  const pager = () => {
-    const scopes = all(".el-pagination");
-    if (scopes.length !== 1) throw new Error("无法唯一识别分页控件。");
-    const scope = scopes[0];
-    const page = Number(scope.querySelector(".el-pager .active")?.textContent);
-    const totalText = clean(scope.querySelector(".el-pagination__total")?.textContent);
-    const total = Number(totalText.match(/共\s*(\d+)\s*条/)?.[1]);
-    if (!Number.isInteger(page) || page < 1 || !Number.isInteger(total)) throw new Error("无法识别当前页码或总条数。");
-    return { scope, page, total };
-  };
-  const disabled = e => !e || e.disabled || e.getAttribute("aria-disabled") === "true" || e.classList.contains("is-disabled");
-  const waitPage = async (target, total, previousSignature) => {
-    let candidate = "", stableSince = 0;
-    await wait(() => {
-      const after = pager(), value = signature();
-      if (loading() || after.page !== target || after.total !== total || !value || value === previousSignature) {
-        candidate = ""; return false;
-      }
-      if (candidate !== value) { candidate = value; stableSince = Date.now(); return false; }
-      return Date.now() - stableSince >= 600;
-    }, "翻页后页码或订单结果未能确认。");
-  };
-  const pageStep = async direction => {
-    const before = pager();
-    const previousSignature = signature();
-    const button = before.scope.querySelector(direction > 0 ? ".btn-next" : ".btn-prev");
-    if (disabled(button)) return false;
-    await log("翻页", before.page + " → " + (before.page + direction));
-    button.click();
-    await waitPage(before.page + direction, before.total, previousSignature);
-    await log("翻页", "目标页订单集合已确认");
-    return true;
-  };
-  const goToPage = async target => {
-    const before = pager();
-    if (before.page === target) return;
-    await log("恢复页码", before.page + " → " + target);
-    const previousSignature = signature();
-    const numbers = all(".el-pager .number", before.scope).filter(e => Number(e.textContent) === target);
-    const jump = all(".el-pagination__jump input", before.scope);
-    if (numbers.length === 1 && !disabled(numbers[0])) numbers[0].click();
-    else if (jump.length === 1 && !disabled(jump[0])) {
-      setPageInput(jump[0], String(target));
-      jump[0].dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
-    } else {
-      while (pager().page !== target) {
-        if (!await pageStep(pager().page < target ? 1 : -1)) throw new Error("无法恢复原查询页码。");
-      }
-      return;
-    }
-    await waitPage(target, before.total, previousSignature);
-  };
-  const snapshot = () => ({
-    url: location.href, signature: signature(), ...((({ page, total }) => ({ page, total }))(pager())),
-    filters: all(".search-item").map(item => {
-      const input = item.querySelector("input");
-      return input ? { label: clean(item.querySelector("label")?.textContent || item.firstChild?.textContent),
-        value: input.value } : null;
-    }).filter(Boolean)
-  });
-  const setPageInput = (input, value) => {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, value);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-  };
-  const restoreList = async checkpoint => {
-    await log("返回列表", "返回原列表；仅核对已有查询，不修改条件或执行查询");
-    const destination = new URL(checkpoint.url);
-    if (destination.origin !== location.origin || destination.pathname !== location.pathname ||
-      destination.hash.split("?")[0] !== "#/auditOfTrade2026") throw new Error("无法安全返回原查询页面。");
-    if (location.hash !== destination.hash) location.hash = destination.hash;
-    await wait(() => !loading() && currentTable() && all(".group-manager-container-float2.trade-in").length === 0,
-      "返回后原查询结果未保留，请手动恢复原列表后重新开始；扩展不会修改日期或执行查询。");
-    const restored = snapshot();
-    if (JSON.stringify(restored.filters) !== JSON.stringify(checkpoint.filters) || restored.total !== checkpoint.total) {
-      throw new Error("返回后原查询条件或总条数未保留，已停止；扩展不会修改日期或执行查询。");
-    }
-    await goToPage(checkpoint.page);
-    if (signature() !== checkpoint.signature) throw new Error("返回后的订单集合与原查询不同，已停止。");
-    await log("返回列表", "原查询条件、页码和订单集合已确认");
-  };
-  const inspectAssets = scope => {
-    const result = {};
-    for (const kind of FILES.ASSET_KINDS) {
-      const containers = all(".image-container1", scope).filter(e => CORE.assetKind(e.querySelector("p")?.textContent) === kind);
-      const images = containers.flatMap(e => all("img.el-image__inner", e));
-      let pending = containers.some(e => all(".el-image__loading", e).length > 0);
-      // Generic dialogs use local field containers, never climb into sibling image groups.
-      if (!containers.length) {
-        for (const field of all(".el-form-item,.ant-form-item", scope)) {
-          if (CORE.assetKind(field.querySelector("label")?.textContent) !== kind) continue;
-          images.push(...all("img", field));
-          pending ||= all(".el-image__loading", field).length > 0;
-        }
-      }
-      const urls = [...new Set(images.filter(i => i.complete && i.naturalWidth > 0).map(i => i.currentSrc || i.src).filter(Boolean))];
-      pending ||= images.some(i => !i.complete || i.naturalWidth <= 0);
-      result[kind] = { url: CORE.chooseUnique(urls), pending, ambiguous: urls.length > 1 };
-    }
-    return result;
-  };
+  const pageContext = () => SITE.context(document, location);
+  const legacyFilters = () => [...document.querySelectorAll(".search-item")].map(item => {
+    const input = item.querySelector("input");
+    return input ? { label: clean(item.querySelector("label")?.textContent || item.firstChild?.textContent), value: input.value } : null;
+  }).filter(Boolean);
+  const getClient = () => SITE.makeClient(globalThis.localStorage?.getItem("userPortalVerifyToken"));
   const prepareAsset = async url => {
     let response;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt < 2; attempt++) {
       try {
         response = await fetch(url, { credentials: "same-origin", signal: AbortSignal.timeout(30000) });
         if (response.ok || ![429, 500, 502, 503, 504].includes(response.status) || attempt === 1) break;
@@ -170,6 +49,11 @@
       await sleep(1000);
     }
     if (!response.ok) throw new Error("图片读取失败：" + response.status);
+    if (response.headers?.get("content-type")?.includes("text/html")) {
+      const error = new Error("图片接口返回了登录页面，请重新登录并恢复原查询。");
+      error.auth = true;
+      throw error;
+    }
     const blob = await response.blob();
     const format = FILES.imageFormat(new Uint8Array(await blob.slice(0, 16).arrayBuffer()));
     const urlData = await new Promise((resolve, reject) => {
@@ -180,151 +64,135 @@
     });
     return { url: urlData, extension: format.extension };
   };
-  const detailScope = orderNo => {
-    const standalone = all(".group-manager-container-float2.trade-in").filter(e => CORE.hasIdentity(clean(e.textContent), orderNo));
-    if (standalone.length === 1) return { element: standalone[0], standalone: true };
-    // Select inner dialogs, excluding their outer wrappers.
-    const dialogs = all('[role="dialog"],.el-dialog,.ant-modal,.layui-layer,.modal-dialog')
-      .filter(e => CORE.hasIdentity(clean(e.textContent), orderNo));
-    const leaves = dialogs.filter(e => !dialogs.some(other => other !== e && e.contains(other)));
-    return leaves.length === 1 ? { element: leaves[0], standalone: false } : null;
-  };
-  const returnToList = async (detail, checkpoint) => {
-    if (detail.standalone) return restoreList(checkpoint);
-    const closes = all("button,a,[role=button]", detail.element).filter(e =>
-      /^(关闭|取消|返回|×|✕)$/.test(clean(e.textContent)) || /^(关闭|Close)$/i.test(e.getAttribute("aria-label") || ""));
-    if (closes.length !== 1) throw new Error("无法唯一识别详情关闭入口。");
-    closes[0].click();
-    await wait(() => !visible(detail.element) && currentTable(), "详情未能安全关闭。");
-    if (signature() !== checkpoint.signature || pager().page !== checkpoint.page) throw new Error("详情关闭后订单列表发生变化。");
-  };
-  const processRow = async (row, table, taskId) => {
-    const id = identity(row, table.columns);
-    const empty = { ...id, ...FILES.manifestFiles() };
-    if (!id.orderNo || !id.referenceNo) return { ...empty, result: "跳过", reason: "订单号或参考号缺失" };
-    const clones = all(".el-table__fixed-body-wrapper", table.root).flatMap(body => all("tbody tr", body))
-      .filter(other => key(identity(other, table.columns)) === key(id));
-    const matchingRows = [row, ...clones];
-    if (matchingRows.some(other => CORE.isMaterialModification(other.textContent))) return { ...empty, result: "跳过", reason: "材料修改" };
-    const rowControls = other => {
-      const cell = other.querySelectorAll("td")[table.columns.operation];
-      return cell ? all("button,a,[role=button]", cell).filter(e => /^(查看详情|详情)$/.test(clean(e.textContent))) : [];
-    };
-    const mainControls = rowControls(row);
-    const controls = mainControls.length ? mainControls : [...new Set(clones.flatMap(rowControls))];
-    if (controls.length !== 1) return { ...empty, result: "失败", reason: "详情入口不唯一" };
-    const checkpoint = snapshot();
-    await log("打开详情", "订单 " + id.orderNo + "，参考号 " + id.referenceNo);
-    controls[0].click();
-    const detail = await wait(() => detailScope(id.orderNo), "详情未打开或订单身份不匹配。");
-    await log("打开详情", "订单身份已确认");
-    let result;
-    try {
-      // Continue as soon as identified detail images are ready; no fixed per-order delay.
-      const deadline = Date.now() + 8000;
-      let assets, states;
-      do {
-        states = inspectAssets(detail.element);
-        assets = Object.fromEntries(Object.entries(states).map(([kind, state]) => [kind, state.url]));
-        if (FILES.REQUIRED_KINDS.every(kind => assets[kind]) && FILES.PROOF_KINDS.every(kind => !states[kind].pending)) break;
-        if (stopped) throw new Error("用户停止任务。");
-        await sleep(250);
-      } while (Date.now() < deadline);
-      if (!assets["SN码"] || !assets["发票"]) {
-        result = { ...empty, result: "跳过", reason: "SN码或发票图片缺失、未加载或不唯一" };
-      } else {
-        for (const kind of FILES.PROOF_KINDS) {
-          if (states[kind].ambiguous || states[kind].pending) throw new Error(kind + "图片未加载或不唯一，已停止该订单下载。");
-        }
-        const prepared = {};
-        const kinds = FILES.ASSET_KINDS.filter(kind => assets[kind]);
-        let cursor = 0;
-        const readers = Array.from({ length: Math.min(2, kinds.length) }, async () => {
-          while (cursor < kinds.length) {
-            const kind = kinds[cursor++];
-            await log("读取图片", kind + "：验证图片格式");
-            try { prepared[kind] = await prepareAsset(assets[kind]); }
-            catch (error) { throw new Error(kind + "：" + error.message); }
-          }
-        });
-        const results = await Promise.allSettled(readers);
-        const failure = results.find(result => result.status === "rejected");
-        if (failure) throw failure.reason;
-        for (const kind of FILES.PROOF_KINDS) {
-          if (!assets[kind]) await log("证明材料", kind + "为空，跳过");
-        }
-        await log("配对下载", "共 " + Object.keys(prepared).length + " 张图片已读取并验证格式");
-        const downloaded = await checkedSend({ type: "PIC_EXPERT_DOWNLOAD_PAIR", taskId, ...id, assets: prepared });
-        result = { ...id, result: "成功", reason: "", ...FILES.manifestFiles(downloaded.files) };
-      }
-    } catch (error) {
-      result = { ...empty, result: "失败", reason: error.message, ...FILES.manifestFiles(error.files) };
+  const identity = row => ({ orderNo: clean(row.merOrderId), referenceNo: clean(row.transRef) });
+  const processRow = async (row, client, taskId) => {
+    const id = identity(row), empty = { ...id, ...FILES.manifestFiles() };
+    if (!id.orderNo || !id.referenceNo) return { ...empty, result: "失败", reason: "订单号或参考号缺失" };
+    if (SITE.MATERIAL_MODIFICATION.has(String(row.status)) || CORE.isMaterialModification(row.statusDesc || row.statusText)) {
+      return { ...empty, result: "跳过", reason: "材料修改" };
     }
-    // Record this outcome before returning, so navigation failures retain the completed pair.
-    await checkedSend({ type: "PIC_EXPERT_MANIFEST_ROW", taskId, row: result });
-    Object.defineProperty(result, "recorded", { value: true });
-    try { await returnToList(detail, checkpoint); }
-    catch (error) { error.rowRecorded = true; throw error; }
+    try {
+      await log("读取详情", "订单 " + id.orderNo + "，参考号 " + id.referenceNo);
+      const states = await client.assets(row, location.origin);
+      const assets = Object.fromEntries(Object.entries(states).map(([kind, state]) => [kind, state.url]));
+      if (FILES.REQUIRED_KINDS.some(kind => !assets[kind])) {
+        return { ...empty, result: "跳过", reason: "SN码或发票图片缺失或不唯一" };
+      }
+      for (const kind of FILES.PROOF_KINDS) {
+        if (states[kind].ambiguous) throw new Error(kind + "图片不唯一，已停止该订单下载。");
+      }
+      const kinds = FILES.ASSET_KINDS.filter(kind => assets[kind]);
+      const prepared = {};
+      let cursor = 0;
+      const readers = Array.from({ length: Math.min(2, kinds.length) }, async () => {
+        while (cursor < kinds.length) {
+          const kind = kinds[cursor++];
+          await log("读取图片", kind + "：验证图片格式");
+          try { prepared[kind] = await prepareAsset(assets[kind]); }
+          catch (error) {
+            if (error.auth) throw error;
+            throw new Error(kind + "：" + error.message);
+          }
+        }
+      });
+      const results = await Promise.allSettled(readers);
+      const failure = results.find(result => result.status === "rejected");
+      if (failure) throw failure.reason;
+      for (const kind of FILES.PROOF_KINDS) if (!assets[kind]) await log("证明材料", kind + "为空，跳过");
+      const downloaded = await checkedSend({ type: "PIC_EXPERT_DOWNLOAD_PAIR", taskId, ...id, assets: prepared });
+      return { ...id, result: "成功", reason: "", ...FILES.manifestFiles(downloaded.files) };
+    } catch (error) {
+      if (error.auth) throw error;
+      return { ...empty, result: "失败", reason: error.message, ...FILES.manifestFiles(error.files) };
+    }
+  };
+  const loadPage = async (client, context, page, total = null) => {
+    const result = await client.list(context.filters, page, context.size);
+    if (total !== null && result.total !== total) throw new Error("接口返回的查询总数发生变化，已停止。");
+    const expected = Math.max(0, Math.min(context.size, result.total - page * context.size));
+    if (result.rows.length !== expected) throw new Error("接口分页条数与查询总数不一致，已停止。");
+    if (result.rows.some(row => !identity(row).orderNo || !identity(row).referenceNo)) throw new Error("订单列表缺少订单号或参考号，已停止。");
     return result;
   };
   const run = async (taskId, checkpoint = null) => {
-    pauseRequested = false; stopped = false;
-    activeTaskId = taskId;
-    let visited = checkpoint?.visitedBefore || 0;
+    pauseRequested = false; stopped = false; activeTaskId = taskId;
     const seen = new Set();
+    let visited = checkpoint?.visitedBefore || 0;
     try {
-      await log("任务启动", "开始扫描当前查询全部分页");
+      const initialContext = pageContext();
+      let context = initialContext;
+      const initialQuery = JSON.stringify(initialContext.filters);
+      const initialVisiblePage = JSON.stringify(initialContext.visiblePage);
+      const ensureContextUnchanged = () => {
+        const current = pageContext();
+        if (JSON.stringify(current.filters) !== initialQuery || current.url !== initialContext.url ||
+          current.size !== initialContext.size || JSON.stringify(current.visiblePage) !== initialVisiblePage) {
+          throw new Error("任务运行期间查询条件或页面发生变化。");
+        }
+        return current;
+      };
+      const client = getClient();
       if (checkpoint) {
-        const current = snapshot();
-        if (current.url !== checkpoint.url || current.total !== checkpoint.total || JSON.stringify(current.filters) !== JSON.stringify(checkpoint.filters)) {
+        if (context.url !== checkpoint.url || (checkpoint.size && context.size !== checkpoint.size) ||
+          (checkpoint.query && JSON.stringify(context.filters) !== JSON.stringify(checkpoint.query)) ||
+          (!checkpoint.query && JSON.stringify(legacyFilters()) !== JSON.stringify(checkpoint.filters))) {
           throw new Error("当前查询与断点不同，请手动恢复原查询；扩展不会调整日期或点击查询。");
         }
-        await goToPage(checkpoint.page);
-        if (signature() !== checkpoint.signature) throw new Error("断点页订单集合已变化，不能安全继续。");
-      } else await goToPage(1);
-      const initial = snapshot();
-      const initialFilters = JSON.stringify(initial.filters);
-      const total = initial.total;
+        if (!Number.isInteger(checkpoint.page) || checkpoint.page < 1 || !Number.isInteger(checkpoint.total)) {
+          throw new Error("旧版断点信息不完整，无法安全继续；请开始新任务。");
+        }
+      }
+      await log("任务启动", "通过网站接口读取当前查询的全部分页");
+      const displayedPage = await loadPage(client, context, initialContext.visiblePage.page - 1);
+      if (displayedPage.total !== initialContext.visiblePage.total || SITE.signature(displayedPage.rows) !== initialContext.visiblePage.signature) {
+        throw new Error("接口结果与页面当前查询不一致，已停止；请重新执行查询后再开始。");
+      }
+      let page = checkpoint ? checkpoint.page - 1 : 0;
+      let result = page === initialContext.visiblePage.page - 1
+        ? displayedPage : await loadPage(client, context, page, checkpoint?.total ?? null);
+      const total = result.total;
+      if (checkpoint && (SITE.signature(result.rows) !== checkpoint.signature || total !== checkpoint.total)) {
+        throw new Error("断点页订单集合已变化，不能安全继续。");
+      }
       while (true) {
-        const table = currentTable();
-        if (!table) throw new Error("无法唯一识别订单表格。");
-        const pageSignature = signature(table);
-        const ids = table.rows.map(row => identity(row, table.columns));
-        await checkedSend({ type: "PIC_EXPERT_CHECKPOINT", taskId, checkpoint: { ...snapshot(), visitedBefore: visited } });
-        for (const id of ids) {
+        const pageSignature = SITE.signature(result.rows);
+        await checkedSend({ type: "PIC_EXPERT_CHECKPOINT", taskId, checkpoint: {
+          url: context.url, page: page + 1, total, signature: pageSignature,
+          filters: legacyFilters(), query: context.filters, size: context.size, visitedBefore: visited
+        } });
+        for (const row of result.rows) {
           if (pauseRequested) throw new Error("已在订单边界暂停。");
           if (stopped) throw new Error("用户停止任务。");
-          const current = snapshot();
-          if (current.signature !== pageSignature || JSON.stringify(current.filters) !== initialFilters) throw new Error("任务运行期间查询结果或条件发生变化。");
+          context = ensureContextUnchanged();
+          const id = identity(row), key = id.orderNo + "::" + id.referenceNo;
           visited += 1;
           if (visited > total) throw new Error("扫描条数超过原查询总条数。");
-          if (seen.has(key(id))) throw new Error("查询结果出现重复订单身份，已停止。");
-          seen.add(key(id));
+          if (seen.has(key)) throw new Error("查询结果出现重复订单身份，已停止。");
+          seen.add(key);
           const status = await checkedSend({ type: "PIC_EXPERT_ROW_STATUS", taskId, identity: id });
           if (status.done) continue;
-          const fresh = currentTable();
-          const matches = fresh?.rows.filter(row => key(identity(row, fresh.columns)) === key(id)) || [];
-          if (matches.length !== 1) throw new Error("无法唯一定位原订单行。");
           await checkedSend({ type: "PIC_EXPERT_ROW_BEGIN", taskId, identity: id });
-          let result;
-          try { result = await processRow(matches[0], fresh, taskId); }
+          let outcome;
+          try { outcome = await processRow(row, client, taskId); }
           catch (error) {
-            if (!error.rowRecorded) await checkedSend({ type: "PIC_EXPERT_MANIFEST_ROW", taskId,
-              row: { ...id, result: "失败", reason: error.message, ...FILES.manifestFiles() } });
-            throw error;
+            if (error.auth) throw error;
+            outcome = { ...id, result: "失败", reason: error.message, ...FILES.manifestFiles() };
           }
-          // Detail outcomes are already persisted before returning; list-only skips need one write.
-          if (!result.recorded) await checkedSend({ type: "PIC_EXPERT_MANIFEST_ROW", taskId, row: result });
+          await checkedSend({ type: "PIC_EXPERT_MANIFEST_ROW", taskId, row: outcome });
         }
         if (pauseRequested) throw new Error("已在订单边界暂停。");
-        if (!await pageStep(1)) break;
+        if ((page + 1) * context.size >= total) break;
+        page += 1;
+        ensureContextUnchanged();
+        result = await loadPage(client, context, page, total);
       }
       if (visited !== total) throw new Error("扫描条数与查询总条数不一致，已停止。");
+      ensureContextUnchanged();
       await checkedSend({ type: "PIC_EXPERT_TASK_END", taskId, status: "completed" });
     } catch (error) {
       if (pauseRequested) {
         await log("暂停任务", error.message);
-        await chrome.runtime.sendMessage({type:"PIC_EXPERT_TASK_PAUSED",taskId,error:stopped ? error.message : ""}).catch(() => {});
+        await chrome.runtime.sendMessage({ type: "PIC_EXPERT_TASK_PAUSED", taskId, error: stopped ? error.message : "" }).catch(() => {});
         return;
       }
       await log("任务中断", error.message, "error");
@@ -333,18 +201,24 @@
   };
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "PIC_EXPERT_PROBE") {
-      sendResponse({ ok: true, ready: Boolean(currentTable()), running }); return false;
+      const ready = SITE.isReady(document, location);
+      let tradeDateRange = null;
+      if (ready) {
+        try {
+          const { filters } = pageContext();
+          tradeDateRange = [filters.beginTransDate, filters.endTransDate];
+        } catch {}
+      }
+      sendResponse({ ok: true, ready, running, tradeDateRange }); return false;
     }
     if (message?.type === "PIC_EXPERT_STOP") { stopped = true; sendResponse({ ok: true }); return false; }
     if (message?.type === "PIC_EXPERT_PAUSE") { pauseRequested = true; sendResponse({ ok: true, running }); return false; }
     if (message?.type !== "PIC_EXPERT_START") return false;
     if (running) { sendResponse({ ok: false, error: "当前页面已有任务。" }); return false; }
     running = true; stopped = false; pauseRequested = false;
-    // Acknowledge immediately: closing the popup must not cancel an hours-long run.
     sendResponse({ ok: true });
     void run(message.taskId, message.checkpoint || null);
     return false;
   });
-  // Exposed only by Node's test harness; not installed on the page's MAIN world.
-  if (typeof module !== "undefined" && module.exports) module.exports = { currentTable, detailScope, run, processRow, restoreList, goToPage };
+  if (typeof module !== "undefined" && module.exports) module.exports = { run };
 })();

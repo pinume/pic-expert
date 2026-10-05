@@ -7,6 +7,8 @@ button { width: 100%; padding: 10px 12px; border-radius: 8px; border: 0; font-we
 button:disabled { cursor: default; opacity: .6; }
 section { margin-top: 14px; display: grid; gap: 6px; font-size: 13px; line-height: 1.45; }
 #error { color: #c62828; white-space: pre-wrap; }
+.completion { padding: 8px 10px; border-radius: 6px; background: #e8f5e9; color: #1b5e20; }
+.completion[data-status="failed"] { background: #ffebee; color: #b71c1c; }
 details { margin-top: 12px; }
 summary { cursor: pointer; }
 #logs { box-sizing: border-box; width: 100%; margin-top: 8px; resize: vertical; font-size: 12px; white-space: pre; }

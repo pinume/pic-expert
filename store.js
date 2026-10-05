@@ -64,7 +64,7 @@
         const request = index.openCursor(IDBKeyRange.only(taskId), "prev");
         request.onsuccess = () => {
           const cursor = request.result;
-          if (!cursor || result.length >= limit) { resolve(limit === Infinity ? result : result.reverse()); return; }
+          if (!cursor || result.length >= limit) { resolve(result.reverse()); return; }
           result.push(cursor.value.value);
           cursor.continue();
         };

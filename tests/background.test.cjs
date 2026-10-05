@@ -47,7 +47,7 @@ function harness(options = {}, initial = null) {
     chrome, importScripts() {}, PIC_EXPERT_CORE: core, PIC_EXPERT_STORE: store, setTimeout, clearTimeout, Date, Map
   });
   const send = (message, source = sender) => new Promise(resolve => listener(message, source, resolve));
-  const begin = () => send({ type: "PIC_EXPERT_TASK_BEGIN", tabId: 7, frameId: 4 }, {});
+  const begin = (tradeDateRange = ["20261001", "20261004"]) => send({ type: "PIC_EXPERT_TASK_BEGIN", tabId: 7, frameId: 4, tradeDateRange }, {});
   const pair = taskId => send({ type: "PIC_EXPERT_DOWNLOAD_PAIR", taskId, orderNo: "O1", referenceNo: "R1", assets });
   return { send, begin, pair, calls, removed, items, store, notify, handlers, task: () => store.snapshot() };
 }
@@ -65,6 +65,27 @@ test("duplicate pair messages download one correctly named pair", async () => {
   assert.match(h.calls[1].filename, /\/R1\/发票\.png$/);
   assert.ok((await h.pair(task.id)).ok);
   assert.equal(h.calls.length, 2);
+});
+test("date range prefixes every new task download path", async () => {
+  const h = harness(), { task } = await h.begin(["20260101", "20260131"]);
+  assert.equal(task.folderName, "20260101-20260131_" + task.id);
+  await h.pair(task.id);
+  await h.send({ type: "PIC_EXPERT_TASK_END", taskId: task.id, status: "completed" });
+  await h.send({ type: "PIC_EXPERT_LOG_EXPORT" }, {});
+  assert.ok(h.calls.length >= 4);
+  assert.ok(h.calls.every(call => call.filename.startsWith("pic-expert/20260101-20260131_" + task.id + "/")));
+});
+test("legacy task logs keep using the task ID folder", async () => {
+  const initial = { id: "OLD", status: "completed", logs: [{ time: "2026-10-05", level: "info", stage: "test", message: "old" }] };
+  const h = harness({}, initial);
+  await h.send({ type: "PIC_EXPERT_LOG_EXPORT" }, {});
+  assert.equal(h.calls[0].filename, "pic-expert/OLD/运行日志-001.txt");
+});
+test("new task creation rejects missing or malformed trade date ranges", async () => {
+  const h = harness();
+  assert.equal((await h.begin(null)).ok, false);
+  assert.equal((await h.begin(["2026/01/01", "20260131"])).ok, false);
+  assert.equal((await h.begin([20260101, "20260131"])).ok, false);
 });
 test("messages from another frame cannot download", async () => {
   const h = harness(), { task } = await h.begin();
@@ -262,6 +283,7 @@ test("graceful pause preserves the task directory and completed files without ex
   assert.equal(h.calls.length,2);
   const resumed=await h.send({type:"PIC_EXPERT_TASK_RESUME",tabId:7,frameId:4},{});
   assert.equal(resumed.task.id,task.id);
+  assert.equal(resumed.task.folderName,task.folderName);
   assert.equal(resumed.task.completed,1);
   assert.equal((await h.send({type:"PIC_EXPERT_ROW_STATUS",taskId:task.id,identity:{orderNo:"O1",referenceNo:"R1"}})).done,true);
 });

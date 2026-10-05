@@ -3,7 +3,7 @@
   "version": "0.4.0",
   "private": true,
   "scripts": {
-    "check": "node --check store.js && node --check background.js && node --check content.js && node --check core.js && node --check page-core.js && node --check popup.js",
+    "check": "node --check store.js && node --check background.js && node --check content.js && node --check core.js && node --check page-core.js && node --check site-api.js && node --check popup.js",
     "test": "node --test tests/*.test.cjs"
   },
   "devDependencies": {

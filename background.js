@@ -26,6 +26,7 @@ const update = (id, sender, operation, running = true) => mutate(async () => {
   return task;
 });
 const summary = async task => task ? { ...task, logs: await db.logs(task.id, 500) } : null;
+const taskDirectory = task => task.folderName || task.id;
 const upsertRow = async (task, changes, row) => {
   const previous = await db.getRow(task.id, row);
   const counter = result => ({ "成功": "completed", "跳过": "skipped", "失败": "failed" }[result]);
@@ -63,7 +64,10 @@ const startTask = message => mutate(async () => {
   const existing = await getTask();
   if (["running", "pausing", "stopping", "finalizing"].includes(existing?.status)) throw new Error("已有任务运行；页面中断时请先暂停或停止。");
   if (!Number.isInteger(message.tabId) || !Number.isInteger(message.frameId)) throw new Error("目标页面不完整。");
-  const task = { id: makeTaskId(), status: "running", tabId: message.tabId, frameId: message.frameId,
+  const range = message.tradeDateRange;
+  if (!Array.isArray(range) || range.length !== 2 || range.some(value => typeof value !== "string" || !/^\d{8}$/.test(value))) throw new Error("无法识别本次查询的交易日期区间。");
+  const id = makeTaskId();
+  const task = { id, folderName: range[0] + "-" + range[1] + "_" + id, status: "running", tabId: message.tabId, frameId: message.frameId,
     startedAt: new Date().toISOString(), page: 1,
     scanned: 0, completed: 0, skipped: 0, failed: 0 };
   const changes = { logs: [] };
@@ -124,10 +128,11 @@ const downloadPair = async (message, sender) => {
     }
     try {
       for (const kind of kinds) {
-        assertTask(await getTask(), taskId, sender);
+        const task = await getTask();
+        assertTask(task, taskId, sender);
         const pair = await db.getPair(taskId, referenceNo);
         const existing = pair.files[kind];
-        const filename = existing?.filename || "pic-expert/" + taskId + "/" + sanitizePathPart(referenceNo) + "/" + kind + assets[kind].extension;
+        const filename = existing?.filename || "pic-expert/" + taskDirectory(task) + "/" + sanitizePathPart(referenceNo) + "/" + kind + assets[kind].extension;
         const downloadId = existing?.downloadId ?? await chrome.downloads.download({ url: assets[kind].url, filename, saveAs: false, conflictAction: "overwrite" });
         await update(taskId, sender, (_task, changes) => {
           pair.files[kind] = { downloadId, filename };
@@ -181,7 +186,7 @@ const exportManifest = (taskId, sender, retry = false) => {
     try { await waitForDownload(task.manifestDownloadId); return await update(taskId, sender, t => { t.manifestError = ""; }, false); }
     catch (error) { return update(taskId, sender, (t, c) => { t.manifestError = "清单下载失败：" + error.message; appendLog(c, "下载清单", t.manifestError, "error"); }, false); }
   }
-  const filename = "pic-expert/" + taskId + "/下载清单.csv";
+  const filename = "pic-expert/" + taskDirectory(task) + "/下载清单.csv";
   try {
     const downloadId = await chrome.downloads.download({ url: "data:text/csv;charset=utf-8," + encodeURIComponent(buildManifestCsv(await db.rows(taskId))), filename, saveAs: false, conflictAction: "overwrite" });
     await update(taskId, sender, t => { t.manifestDownloadId = downloadId; }, false);
@@ -315,7 +320,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           page = await db.logPage(task.id, after);
           if (!page.logs.length) break;
           const text = page.logs.map(e => e.time + " [" + e.level + "] " + e.stage + "：" + e.message).join("\n");
-          const id = await chrome.downloads.download({url:"data:text/plain;charset=utf-8," + encodeURIComponent(text),filename:"pic-expert/" + task.id + "/运行日志-" + String(part++).padStart(3,"0") + ".txt",saveAs:false,conflictAction:"overwrite"});
+          const id = await chrome.downloads.download({url:"data:text/plain;charset=utf-8," + encodeURIComponent(text),filename:"pic-expert/" + taskDirectory(task) + "/运行日志-" + String(part++).padStart(3,"0") + ".txt",saveAs:false,conflictAction:"overwrite"});
           await waitForDownload(id);
           after = page.next;
         } while (page.more);

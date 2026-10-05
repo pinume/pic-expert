@@ -6,6 +6,7 @@ const resumeButton = document.querySelector("#resume");
 const exportLogsButton = document.querySelector("#export-logs");
 const statusElement = document.querySelector("#status");
 const progressElement = document.querySelector("#progress");
+const completionElement = document.querySelector("#completion");
 const errorElement = document.querySelector("#error");
 const logsElement = document.querySelector("#logs");
 const copyLogsButton = document.querySelector("#copy-logs");
@@ -22,6 +23,13 @@ const renderTask = task => {
   progressElement.textContent = task ? "页 " + task.page + " · 已检查 " + task.scanned +
     " · 成功 " + task.completed + " · 跳过 " + task.skipped + " · 失败 " + task.failed +
     (task.checkpoint ? " · 查询总数 " + task.checkpoint.total : "") : "";
+  const terminal = task && ["completed", "failed"].includes(task.status);
+  completionElement.hidden = !terminal;
+  completionElement.dataset.status = terminal ? task.status : "";
+  completionElement.textContent = terminal ?
+    (task.status === "completed" ? "任务已完成" : "任务已停止") + "。成功 " + task.completed + "，跳过 " + task.skipped +
+      "，失败 " + task.failed + "。" + (task.manifestError ? "清单下载失败" :
+        task.manifestDownloadId !== undefined ? "清单已下载" : "清单状态未知") : "";
   errorElement.textContent = [task?.error, task?.manifestError].filter(Boolean).join("\n");
   startButton.disabled = ["running", "pausing", "stopping", "finalizing"].includes(task?.status);
   stopButton.hidden = !["running", "pausing", "paused", "stopping", "finalizing"].includes(task?.status);
@@ -50,15 +58,17 @@ const launch = async resume => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) throw new Error("没有可用的当前标签页。");
     const injected = await chrome.scripting.executeScript({
-      target: { tabId: tab.id, allFrames: true }, files: ["core.js", "page-core.js", "content.js"]
+      target: { tabId: tab.id, allFrames: true }, files: ["core.js", "page-core.js", "site-api.js", "content.js"]
     });
     const probes = await Promise.all(injected.map(async result => ({
       frameId: result.frameId,
       result: await chrome.tabs.sendMessage(tab.id, { type: "PIC_EXPERT_PROBE" }, { frameId: result.frameId }).catch(() => null)
     })));
     const frameId = globalThis.PIC_EXPERT_PAGE_CORE.chooseFrame(probes);
-    if (probes.find(probe => probe.frameId === frameId)?.result?.running) throw new Error("页面上一笔任务仍在退出，请稍候，或手动刷新并恢复原查询后继续。");
-    task = (await request({ type: resume ? "PIC_EXPERT_TASK_RESUME" : "PIC_EXPERT_TASK_BEGIN", tabId: tab.id, frameId })).task;
+    const probe = probes.find(item => item.frameId === frameId)?.result;
+    if (probe?.running) throw new Error("页面上一笔任务仍在退出，请稍候，或手动刷新并恢复原查询后继续。");
+    task = (await request({ type: resume ? "PIC_EXPERT_TASK_RESUME" : "PIC_EXPERT_TASK_BEGIN", tabId: tab.id, frameId,
+      ...(resume ? {} : { tradeDateRange: probe?.tradeDateRange }) })).task;
     const response = await chrome.tabs.sendMessage(tab.id, { type: "PIC_EXPERT_START", taskId: task.id, checkpoint: resume ? task.checkpoint : null }, { frameId });
     if (!response?.ok) throw new Error(response?.error || "页面任务启动失败。");
     renderTask(task);
