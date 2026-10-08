@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 require("fake-indexeddb/auto");
 const { TaskStore } = require("../store.js");
-const { harness: background } = require("./background-harness.cjs");
+const { harness: background, assets } = require("./background-harness.cjs");
 const { harness: content, row } = require("./content-harness.cjs");
 let sequence = 0;
 const tick = () => new Promise(setImmediate);
@@ -61,6 +61,54 @@ async function finishOrder(backend, reference) {
     });
     if (item.state === "in_progress") backend.notify(item.id, "complete");
   }
+}
+
+for (const action of ["PAUSE", "STOP"]) for (const reportedFailure of [false, true]) {
+  test(`worker restart after image completion preserves ${reportedFailure ? "reported failure" : "unreported success"} on ${action}`, async t => {
+    const f = await flow(t, [[row("O1", "R1")]]);
+    const identity = { orderNo: "O1", referenceNo: "R1" };
+    assert.ok((await f.backend.send({ type: "PIC_EXPERT_ROW_BEGIN", taskId: f.task.id, identity })).ok);
+    assert.ok((await f.backend.send({ type: "PIC_EXPERT_DOWNLOAD_PAIR", taskId: f.task.id, ...identity,
+      assets: { ...assets, "证明材料图三": assets["发票"] } })).ok);
+    // Files complete before the page confirms its final result.
+    assert.equal((await f.store.getPair(f.task.id, "R1")).status, "complete");
+    assert.equal(await f.store.getRow(f.task.id, identity), null);
+    const before = await f.store.getTask();
+    assert.deepEqual([before.scanned, before.completed, before.failed, before.currentRows.length], [0, 0, 0, 1]);
+    if (reportedFailure) assert.ok((await f.backend.send({ type: "PIC_EXPERT_MANIFEST_ROW", taskId: f.task.id,
+      row: { ...identity, result: "失败", reason: "页面中断" } })).ok);
+
+    const store = new TaskStore(f.store.storage, f.store.databaseName);
+    t.after(async () => (await store.open()).close());
+    const restarted = background({ store, items: f.backend.items });
+    const response = await restarted.send({ type: "PIC_EXPERT_TASK_" + action }, {});
+    assert.ok(response.ok);
+    const task = await store.getTask(), result = await store.getRow(task.id, identity);
+    assert.equal(task.id, f.task.id);
+    assert.equal(task.folderName, f.task.folderName);
+    assert.equal(task.status, action === "PAUSE" ? "paused" : "failed");
+    assert.deepEqual([task.scanned, task.completed, task.failed, task.currentRows.length],
+      [1, reportedFailure ? 0 : 1, reportedFailure ? 1 : 0, 0]);
+    assert.equal(result.result, reportedFailure ? "失败" : "成功");
+    assert.equal(result.reason, reportedFailure ? "页面中断" : "");
+    const directory = "pic-expert/" + task.folderName + "/R1/";
+    assert.deepEqual(f.backend.calls.map(call => call.filename),
+      [directory + "SN码.jpg", directory + "发票.png", directory + "证明材料图三.png"]);
+    assert.deepEqual([result.snFile, result.invoiceFile, result.proof1File, result.proof2File, result.proof3File],
+      [directory + "SN码.jpg", directory + "发票.png", "", "", directory + "证明材料图三.png"]);
+    assert.ok(f.backend.calls.every((_call, index) => f.backend.items.get(index + 1).exists));
+    assert.equal(restarted.removed.length, 0);
+
+    // Repeated recovery must neither duplicate counts nor download images again.
+    assert.ok((await restarted.send({ type: "PIC_EXPERT_TASK_STOP" }, {})).ok);
+    assert.ok((await restarted.send({ type: "PIC_EXPERT_TASK_STOP" }, {})).ok);
+    const final = await store.getTask();
+    assert.deepEqual([final.scanned, final.completed, final.failed], [task.scanned, task.completed, task.failed]);
+    assert.equal(restarted.calls.length, 1);
+    assert.equal(restarted.calls[0].filename, "pic-expert/" + task.folderName + "/下载清单.csv");
+    assert.equal(decodeURIComponent(restarted.calls[0].url).split(",").slice(1).join(","),
+      "\uFEFF订单号,参考号,处理结果,原因\r\nO1,R1," + result.result + "," + result.reason);
+  });
 }
 
 test("force pause aborts three detail requests through the real site API", async t => {

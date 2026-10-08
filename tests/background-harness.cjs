@@ -53,9 +53,16 @@ function harness(options = {}, initial = null) {
       }
     }
   };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../background.js"), "utf8"), {
-    chrome, importScripts() {}, PIC_EXPERT_CORE: core, PIC_EXPERT_STORE: store, setTimeout, clearTimeout, Date, Map
+  const sandbox = vm.createContext({
+    chrome, PIC_EXPERT_CORE: core, PIC_EXPERT_STORE: store, setTimeout, clearTimeout, Date, Map,
+    importScripts(...files) {
+      for (const file of files) {
+        if (["core.js", "store.js"].includes(file)) continue; // Supplied above.
+        vm.runInContext(fs.readFileSync(path.join(__dirname, "..", file), "utf8"), sandbox);
+      }
+    }
   });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../background.js"), "utf8"), sandbox);
   const send = (message, source = sender) => new Promise(resolve => listener(message, source, resolve));
   const begin = (tradeDateRange = ["20261001", "20261004"]) => send({ type: "PIC_EXPERT_TASK_BEGIN", tabId: 7, frameId: 4, tradeDateRange }, {});
   const pair = taskId => send({ type: "PIC_EXPERT_DOWNLOAD_PAIR", taskId, orderNo: "O1", referenceNo: "R1", assets });
