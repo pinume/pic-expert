@@ -32,13 +32,21 @@
       this.initializing ||= (async () => {
         const { picExpertTask: legacy } = await this.storage.get("picExpertTask");
         if (!legacy) return;
-        if (legacy.storeVersion === 1) { this.activeId = legacy.id; return; }
-        const { manifestRows = [], downloads = {}, logs = [], ...task } = legacy;
-        task.scanned = manifestRows.length;
-        for (const [key, result] of [["completed", "成功"], ["skipped", "跳过"], ["failed", "失败"]]) task[key] = manifestRows.filter(row => row.result === result).length;
-        if (!await this.read("tasks", task.id)) await this.commit(task, { rows: manifestRows, pairs: Object.entries(downloads).map(([referenceNo, pair]) => ({ referenceNo, ...pair })), logs });
-        await this.storage.set({ picExpertTask: { id: task.id, storeVersion: 1 } });
-        this.activeId = task.id;
+        let task = await this.read("tasks", legacy.id), changes;
+        if (!task && legacy.storeVersion !== 1) {
+          const { manifestRows = [], downloads = {}, logs = [], ...metadata } = legacy;
+          task = metadata;
+          task.scanned = manifestRows.length;
+          for (const [key, result] of [["completed", "成功"], ["skipped", "跳过"], ["failed", "失败"]]) task[key] = manifestRows.filter(row => row.result === result).length;
+          changes = { rows: manifestRows, pairs: Object.entries(downloads).map(([referenceNo, pair]) => ({ referenceNo, ...pair })), logs };
+        }
+        if (task && (changes || !task.currentRows || Object.hasOwn(task, "currentRow"))) {
+          task.currentRows ??= task.currentRow ? [task.currentRow] : [];
+          delete task.currentRow;
+          await this.commit(task, changes);
+        }
+        if (legacy.storeVersion !== 1) await this.storage.set({ picExpertTask: { id: legacy.id, storeVersion: 1 } });
+        this.activeId = legacy.id;
       })().catch(error => { this.initializing = null; throw error; });
       return this.initializing;
     }

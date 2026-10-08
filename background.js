@@ -34,8 +34,8 @@ const upsertRow = async (task, changes, row) => {
   if (counter(row.result)) task[counter(row.result)]++;
   if (!previous) task.scanned++;
   changes.rows.push(row);
-  row.page ??= task.page;
-  if (task.currentRow?.orderNo === row.orderNo && task.currentRow?.referenceNo === row.referenceNo) delete task.currentRow;
+  row.page ??= task.currentRows?.find(item => item.orderNo === row.orderNo && item.referenceNo === row.referenceNo)?.page || task.page;
+  task.currentRows = (task.currentRows || []).filter(item => item.orderNo !== row.orderNo || item.referenceNo !== row.referenceNo);
 };
 const waitForDownload = async (id, timeoutMs = 120000, taskId = null) => {
   if (!Number.isInteger(id)) throw new Error("Chrome 未返回有效下载编号。");
@@ -69,7 +69,7 @@ const startTask = message => mutate(async () => {
   const id = makeTaskId();
   const task = { id, folderName: range[0] + "-" + range[1] + "_" + id, status: "running", tabId: message.tabId, frameId: message.frameId,
     startedAt: new Date().toISOString(), page: 1,
-    scanned: 0, completed: 0, skipped: 0, failed: 0 };
+    scanned: 0, completed: 0, skipped: 0, failed: 0, currentRows: [] };
   const changes = { logs: [] };
   appendLog(changes, "创建任务", "任务 " + task.id + "，frame " + task.frameId);
   await db.save(task, changes);
@@ -92,8 +92,14 @@ const rollback = async (taskId, referenceNo, sender, reason) => {
   for (const [kind, file] of Object.entries(pair.files)) {
     try {
       await chrome.downloads.cancel(file.downloadId).catch(() => {});
+      const [item] = await chrome.downloads.search({ id: file.downloadId });
+      if (!item) throw new Error("下载记录丢失，无法确认文件是否已清理。");
+      if (item.exists === false || item.state === "interrupted") continue;
       await chrome.downloads.removeFile(file.downloadId);
-    } catch { leftovers[kind] = file; }
+    } catch {
+      const [item] = await chrome.downloads.search({ id: file.downloadId }).catch(() => []);
+      if (item?.exists !== false) leftovers[kind] = file;
+    }
   }
   const error = reason + (Object.keys(leftovers).length ? "；部分文件无法清理，请查看运行日志。" : "");
   await update(taskId, sender, (_task, changes) => {
@@ -117,10 +123,14 @@ const downloadPair = async (message, sender) => {
   if (pairs.has(key)) return pairs.get(key);
   const promise = (async () => {
     assertTask(await getTask(), taskId, sender);
-    const previous = await db.getPair(taskId, referenceNo);
+    let previous = await db.getPair(taskId, referenceNo);
     if (previous.status === "complete") return previous.files;
     if (previous.status === "failed") {
       const task = await getTask();
+      if ((previous.generation || 0) !== (task.generation || 0) && Object.keys(previous.files).length) {
+        await rollback(taskId, referenceNo, sender, "继续前重新清理残留文件。");
+        previous = await db.getPair(taskId, referenceNo);
+      }
       if ((previous.generation || 0) === (task.generation || 0) || Object.keys(previous.files).length) {
         const error = new Error(previous.error); error.files = previous.files; throw error;
       }
@@ -170,9 +180,11 @@ const reconcile = (taskId, sender) => {
     }, false);
   }
   await update(taskId, sender, async (task, changes) => {
-    if (task.currentRow && !await db.getRow(taskId, task.currentRow)) await upsertRow(task, changes,
-      { ...task.currentRow, result: "失败", reason: task.error || "任务中断。", ...manifestFiles() });
-    delete task.currentRow;
+    for (const identity of task.currentRows || []) {
+      const previous = await db.getRow(taskId, identity);
+      await upsertRow(task, changes, { ...manifestFiles(), ...previous, ...identity, result: "失败", reason: task.error || "任务中断。" });
+    }
+    task.currentRows = [];
   }, false);
   })().finally(() => recoveries.delete(taskId));
   recoveries.set(taskId, promise);
@@ -227,25 +239,26 @@ const pauseTask = async sender => {
   const task = await getTask();
   if (!task || !["running", "pausing"].includes(task.status)) return task;
   const force = task.status === "pausing";
-  await update(task.id, sender, (t, c) => { t.status = "pausing"; t.forcePause = force; appendLog(c, "暂停任务", force ? "中断当前等待并保存断点" : "等待当前订单结束"); }, false);
-  const response = await chrome.tabs.sendMessage(task.tabId, { type: "PIC_EXPERT_PAUSE" }, { frameId: task.frameId }).catch(() => null);
-  if (force || !response?.running) {
+  await update(task.id, sender, (t, c) => { t.status = "pausing"; t.forcePause = force; appendLog(c, "暂停任务", force ? "中断当前等待并保存断点" : "等待在途订单结束"); }, false);
+  const response = await chrome.tabs.sendMessage(task.tabId, { type: "PIC_EXPERT_PAUSE", force }, { frameId: task.frameId }).catch(() => null);
+  if (!response?.running) {
     await update(task.id, sender, t => { t.forcePause = true; }, false);
     await reconcile(task.id, sender);
     return update(task.id, sender, t => { if (t.status === "pausing") t.status = "paused"; delete t.forcePause; }, false);
   }
+  if (force) await reconcile(task.id, sender);
   return getTask();
 };
 const resumeTask = (message, sender) => mutate(async () => {
   if (sender.tab) throw new Error("请从扩展弹窗继续任务。");
   const task = await getTask();
-  if (!task || !["paused", "failed"].includes(task.status) || !task.checkpoint) throw new Error("没有可继续的断点，请先完成原查询。");
+  if (!task || !(["paused", "failed"].includes(task.status) || task.status === "completed" && task.failed > 0) || !task.checkpoint) throw new Error("没有可继续的断点，请先完成原查询。");
   if (!Number.isInteger(message.tabId) || !Number.isInteger(message.frameId)) throw new Error("目标页面不完整。");
   task.tabId = message.tabId; task.frameId = message.frameId; task.status = "running"; task.error = "";
   task.generation = (task.generation || 0) + 1;
   delete task.forcePause; task.manifestError = "";
   delete task.finishedAt; delete task.finalStatus; delete task.manifestDownloadId;
-  const changes = { logs: [] }; appendLog(changes, "继续任务", "沿用任务目录，从保存页码核对并继续");
+  const changes = { logs: [] }; appendLog(changes, "继续任务", "沿用任务目录，核对断点后重新扫描全部分页");
   await db.save(task, changes); return task;
 });
 const rowStatus = async (message, sender) => {
@@ -275,14 +288,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case "PIC_EXPERT_TASK_PAUSE": return { ok: true, task: await summary(await pauseTask(sender)) };
       case "PIC_EXPERT_TASK_PAUSED": {
         const task = await getTask(); assertTask(task, message.taskId, sender, false);
-        if (task.forcePause || !["pausing", "paused"].includes(task.status)) return { ok: true };
-        return { ok: true, task: await update(task.id, sender, t => { t.status = "paused"; if (message.error) t.error = message.error; }, false) };
+        if (!["pausing", "paused"].includes(task.status)) return { ok: true };
+        await reconcile(task.id, sender);
+        return { ok: true, task: await update(task.id, sender, t => { if (t.status === "pausing") t.status = "paused"; delete t.forcePause; if (message.error) t.error = message.error; }, false) };
       }
       case "PIC_EXPERT_CHECKPOINT":
         return { ok: true, task: await update(message.taskId, sender, t => {
           const previous = t.checkpoint;
+          if (t.currentRows?.length) throw new Error("当前页仍有订单正在处理，不能更新断点。");
           t.checkpoint = { ...message.checkpoint, visitedBefore: previous?.page === message.checkpoint.page ? previous.visitedBefore : message.checkpoint.visitedBefore };
           t.page = message.checkpoint.page;
+          t.total = message.checkpoint.total;
         }) };
       case "PIC_EXPERT_ROW_STATUS": return { ok: true, ...await rowStatus(message, sender) };
       case "PIC_EXPERT_LOG":
@@ -290,18 +306,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return { ok: true };
       case "PIC_EXPERT_DOWNLOAD_PAIR": return { ok: true, files: await downloadPair(message, sender) };
       case "PIC_EXPERT_ROW_BEGIN":
-        return { ok: true, task: await update(message.taskId, sender, (t, c) => { t.currentRow = message.identity; appendLog(c, "检查订单", "订单 " + message.identity.orderNo + "，参考号 " + message.identity.referenceNo); }) };
+        return { ok: true, task: await update(message.taskId, sender, (t, c) => {
+          if (!message.identity?.orderNo || !message.identity.referenceNo) throw new Error("订单身份不完整。");
+          t.currentRows ||= [];
+          if (t.currentRows.some(row => row.orderNo === message.identity.orderNo && row.referenceNo === message.identity.referenceNo)) return;
+          if (t.currentRows.length >= 3) throw new Error("同时处理的订单不能超过三笔。");
+          t.currentRows.push({ ...message.identity, page: t.page });
+          appendLog(c, "检查订单", "订单 " + message.identity.orderNo + "，参考号 " + message.identity.referenceNo);
+        }) };
       case "PIC_EXPERT_MANIFEST_ROW":
         return { ok: true, task: await update(message.taskId, sender, async (t, c) => {
           await upsertRow(t, c, message.row);
           appendLog(c, "订单结果", message.row.result + (message.row.reason ? "：" + message.row.reason : ""), message.row.result === "失败" ? "error" : "info");
         }) };
       case "PIC_EXPERT_TASK_END": return { ok: true, task: await summary(await finalizeTask(message, sender)) };
+      case "PIC_EXPERT_TASK_HALT":
+        return { ok: true, task: await update(message.taskId, sender, t => { t.status = "stopping"; t.error = message.error || "任务中断。"; }) };
       case "PIC_EXPERT_TASK_STOP": {
         const task = await getTask();
         if (!task || !["running", "pausing", "paused", "stopping", "finalizing"].includes(task.status)) return { ok: true, task: await summary(task) };
         await update(task.id, sender, t => { t.status = "stopping"; t.finalStatus = "failed"; t.error = "用户停止任务。"; }, false);
-        await chrome.tabs.sendMessage(task.tabId, { type: "PIC_EXPERT_STOP" }, { frameId: task.frameId }).catch(() => {});
+        const response = await chrome.tabs.sendMessage(task.tabId, { type: "PIC_EXPERT_STOP" }, { frameId: task.frameId }).catch(() => null);
+        if (response?.running) return { ok: true, task: await summary(await getTask()) };
         return { ok: true, task: await summary(await finalizeTask({ taskId: task.id, status: "failed", error: "用户停止任务。" }, sender)) };
       }
       case "PIC_EXPERT_MANIFEST_RETRY": {

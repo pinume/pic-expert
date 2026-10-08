@@ -1,56 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const vm = require("node:vm");
-const fs = require("node:fs");
-const path = require("node:path");
-const core = require("../core.js");
-const { MemoryStore } = require("./memory-store.cjs");
-const sender = { tab: { id: 7 }, frameId: 4 };
-const assets = { "SN码": { extension: ".jpg", url: "data:image/jpeg;base64,/9j/" },
-  "发票": { extension: ".png", url: "data:image/png;base64,iVBORw==" } };
-function harness(options = {}, initial = null) {
-  let listener, stored = initial;
-  const store = options.store || new MemoryStore(initial);
-  const calls = [], removed = [], items = options.items || new Map();
-  const handlers = new Set();
-  const notify = (id, state) => {
-    items.get(id).state = state;
-    for (const handler of handlers) handler({id,state:{current:state}});
-  };
-  const chrome = {
-    storage: { local: {
-      get: async () => ({ picExpertTask: structuredClone(stored) }),
-      set: async value => { stored = structuredClone(value.picExpertTask); }
-    } },
-    runtime: { onMessage: { addListener: f => { listener = f; } } },
-    tabs: { sendMessage: async () => ({ ok: true, running: Boolean(options.livePage) }) },
-    downloads: {
-      onChanged: {addListener:handler=>handlers.add(handler),removeListener:handler=>handlers.delete(handler)},
-      download: async args => {
-        const id = Math.max(0, ...items.keys()) + 1;
-        calls.push(args);
-        const failed = (options.failInvoice && args.filename.includes("发票")) ||
-          (options.failProof && args.filename.includes(options.failProof)) ||
-          (options.failManifest && args.filename.endsWith(".csv"));
-        items.set(id, { id, state: failed ? "interrupted" : options.holdPair && !args.filename.endsWith(".csv") ? "in_progress" : "complete", error: failed ? "NETWORK_FAILED" : undefined });
-        return id;
-      },
-      search: async ({ id }) => items.has(id) ? [items.get(id)] : [],
-      cancel: async id => { if (items.has(id)) notify(id,"interrupted"); },
-      removeFile: async id => {
-        if ((options.failRemove && id === 1) || options.failRemoveId === id) throw new Error("file_locked");
-        removed.push(id);
-      }
-    }
-  };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../background.js"), "utf8"), {
-    chrome, importScripts() {}, PIC_EXPERT_CORE: core, PIC_EXPERT_STORE: store, setTimeout, clearTimeout, Date, Map
-  });
-  const send = (message, source = sender) => new Promise(resolve => listener(message, source, resolve));
-  const begin = (tradeDateRange = ["20261001", "20261004"]) => send({ type: "PIC_EXPERT_TASK_BEGIN", tabId: 7, frameId: 4, tradeDateRange }, {});
-  const pair = taskId => send({ type: "PIC_EXPERT_DOWNLOAD_PAIR", taskId, orderNo: "O1", referenceNo: "R1", assets });
-  return { send, begin, pair, calls, removed, items, store, notify, handlers, task: () => store.snapshot() };
-}
+const { harness, assets } = require("./background-harness.cjs");
+
 test("concurrent starts create one task", async () => {
   const h = harness();
   const results = await Promise.all([h.begin(), h.begin()]);
@@ -97,7 +48,7 @@ test("failed invoice rolls back the pair and never marks success", async () => {
   const h = harness({ failInvoice: true }), { task } = await h.begin();
   assert.equal((await h.pair(task.id)).ok, false);
   assert.equal(h.task().downloads.R1.status, "failed");
-  assert.deepEqual(h.removed, [1, 2]);
+  assert.deepEqual(h.removed, [1]);
   assert.deepEqual(h.task().downloads.R1.files, {});
 });
 test("failed rollback retains the actual leftover path", async () => {
@@ -251,7 +202,7 @@ test("failed proof image rolls back required and optional files and never succee
   const response = await h.send({type:"PIC_EXPERT_DOWNLOAD_PAIR",taskId:task.id,orderNo:"O1",referenceNo:"R1",assets:proofAssets});
   assert.equal(response.ok, false);
   assert.equal(h.calls.length, 4);
-  assert.deepEqual(h.removed, [1,2,3,4]);
+  assert.deepEqual(h.removed, [1,2,3]);
   await h.send({type:"PIC_EXPERT_TASK_END",taskId:task.id,status:"completed"});
   assert.equal(h.task().manifestRows[0].result, "失败");
   assert.equal(h.task().manifestRows[0].proof1File, "");
@@ -328,6 +279,7 @@ test("force pause cleans an in-flight pair and retains a resumable checkpoint", 
   assert.equal(h.task().status,"pausing");
   await h.send({type:"PIC_EXPERT_TASK_PAUSE"},{});
   assert.equal((await download).ok,false);
+  await h.send({type:"PIC_EXPERT_TASK_PAUSED",taskId:task.id});
   assert.equal(h.task().status,"paused");
   assert.deepEqual(h.task().downloads.R1.files,{});
   assert.equal(h.calls.some(c=>c.filename.endsWith(".csv")),false);
@@ -395,5 +347,67 @@ test("force-pause cleanup blocks new tasks until pending downloads settle", asyn
   while(!h.task().forcePause) await new Promise(setImmediate);
   assert.equal((await h.begin()).ok,false);
   await pause; await download;
+  await h.send({type:"PIC_EXPERT_TASK_PAUSED",taskId:task.id});
   assert.equal(h.task().status,"paused");
+});
+
+test("continuation retains locked leftovers and retries after the user removes them", async () => {
+  const options = { failInvoice: true, failRemove: true };
+  const h = harness(options), { task } = await h.begin();
+  await saveCheckpoint(h, task.id);
+  assert.equal((await h.pair(task.id)).ok, false);
+  await h.send({ type: "PIC_EXPERT_TASK_END", taskId: task.id, status: "failed" });
+  await h.send({ type: "PIC_EXPERT_TASK_RESUME", tabId: 7, frameId: 4 }, {});
+  options.failInvoice = false;
+  const before = h.calls.length;
+  assert.equal((await h.pair(task.id)).ok, false);
+  assert.equal(h.calls.length, before);
+  assert.ok(h.task().downloads.R1.files["SN码"]);
+  await h.send({ type: "PIC_EXPERT_TASK_END", taskId: task.id, status: "failed" });
+  h.items.get(1).exists = false;
+  await h.send({ type: "PIC_EXPERT_TASK_RESUME", tabId: 7, frameId: 4 }, {});
+  assert.equal((await h.pair(task.id)).ok, true);
+  assert.equal(h.task().downloads.R1.status, "complete");
+  assert.ok(h.task().downloads.R1.files["SN码"].downloadId !== 1);
+});
+
+test("failed cancellation retains the in-progress download and logs its path", async () => {
+  const h = harness({ holdPair: true, failCancel: true }), { task } = await h.begin();
+  const download = h.pair(task.id);
+  while (!h.task().downloads.R1?.files["SN码"]) await new Promise(setImmediate);
+  await h.send({ type: "PIC_EXPERT_TASK_STOP" }, {});
+  assert.equal((await download).ok, false);
+  assert.ok(h.task().downloads.R1.files["SN码"]);
+  assert.equal(h.items.get(1).state, "in_progress");
+  assert.ok(h.task().logs.some(entry => entry.stage === "残留文件" && entry.message.includes("SN码.jpg")));
+});
+
+test("missing download history does not claim that an unknown file was removed", async () => {
+  const initial = interruptedTask();
+  const h = harness({ items: new Map() }, initial);
+  await h.send({ type: "PIC_EXPERT_TASK_STOP" }, {});
+  assert.ok(h.task().downloads.R1.files["SN码"]);
+  assert.match(h.task().manifestRows[0].reason, /无法清理/);
+});
+
+test("worker restart reconciles every in-flight identity and retains completed rows", async () => {
+  const identities = [1, 2, 3].map(n => ({ orderNo: "O" + n, referenceNo: "R" + n, page: 2 }));
+  const h = harness({}, { id: "T1", status: "running", tabId: 7, frameId: 4, page: 2, currentRows: identities,
+    manifestRows: [{ orderNo: "O0", referenceNo: "R0", result: "成功", page: 1 }],
+    downloads: { R1: { orderNo: "O1", status: "pending", files: { "SN码": { downloadId: 1, filename: "SN码.jpg" } } } } });
+  await h.send({ type: "PIC_EXPERT_TASK_PAUSE" }, {});
+  assert.equal(h.task().status, "paused");
+  assert.deepEqual([h.task().scanned, h.task().completed, h.task().failed, h.task().currentRows.length], [4, 1, 3, 0]);
+  assert.ok(h.task().manifestRows.filter(row => row.result === "失败").every(row => row.page === 2));
+  assert.deepEqual(h.task().downloads.R1.files, {});
+});
+
+test("duplicate row messages do not occupy extra slots or double count results", async () => {
+  const h = harness(), { task } = await h.begin();
+  const identity = { orderNo: "O1", referenceNo: "R1" };
+  await Promise.all(Array.from({ length: 3 }, () => h.send({ type: "PIC_EXPERT_ROW_BEGIN", taskId: task.id, identity })));
+  assert.equal(h.task().currentRows.length, 1);
+  const row = { ...identity, result: "跳过", reason: "材料修改" };
+  await Promise.all(Array.from({ length: 3 }, () => h.send({ type: "PIC_EXPERT_MANIFEST_ROW", taskId: task.id, row })));
+  assert.deepEqual([h.task().currentRows.length, h.task().scanned, h.task().skipped], [0, 1, 1]);
 });

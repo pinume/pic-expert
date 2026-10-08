@@ -1,5 +1,6 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "116",
   "name": "Pic Expert",
   "version": "0.4.0",
   "description": "按当前查询结果批量下载订单 SN 码、发票及证明材料图片，并生成汇总清单。",

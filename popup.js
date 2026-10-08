@@ -18,11 +18,11 @@ const request = async message => {
   return response;
 };
 const renderTask = task => {
-  const labels = { running: "运行中", pausing: "等待当前订单结束后暂停", paused: "已暂停", stopping: "正在停止", finalizing: "正在生成清单", completed: "已完成", failed: "已停止" };
+  const labels = { running: "运行中", pausing: "等待在途订单结束后暂停", paused: "已暂停", stopping: "正在停止", finalizing: "正在生成清单", completed: "已完成", failed: "已停止" };
   statusElement.textContent = task ? labels[task.status] || task.status : "未开始";
-  progressElement.textContent = task ? "页 " + task.page + " · 已检查 " + task.scanned +
-    " · 成功 " + task.completed + " · 跳过 " + task.skipped + " · 失败 " + task.failed +
-    (task.checkpoint ? " · 查询总数 " + task.checkpoint.total : "") : "";
+  progressElement.textContent = task ? "订单总数 " + (task.total ?? task.checkpoint?.total ?? "核对中") +
+    " · 页 " + task.page + " · 已处理 " + task.scanned + " · 正在处理 " + (task.currentRows?.length || 0) +
+    " · 成功 " + task.completed + " · 跳过 " + task.skipped + " · 失败 " + task.failed : "";
   const terminal = task && ["completed", "failed"].includes(task.status);
   completionElement.hidden = !terminal;
   completionElement.dataset.status = terminal ? task.status : "";
@@ -35,7 +35,7 @@ const renderTask = task => {
   stopButton.hidden = !["running", "pausing", "paused", "stopping", "finalizing"].includes(task?.status);
   pauseButton.hidden = !["running", "pausing"].includes(task?.status);
   pauseButton.textContent = task?.status === "pausing" ? "立即暂停当前等待" : "暂停任务";
-  resumeButton.hidden = !["paused", "failed"].includes(task?.status) || !task?.checkpoint;
+  resumeButton.hidden = !(["paused", "failed"].includes(task?.status) || task?.status === "completed" && task.failed > 0) || !task?.checkpoint;
   exportLogsButton.disabled = !task || exportingLogs;
   retryButton.hidden = !task?.manifestError;
   const logText = (task?.logs || []).map(entry => new Date(entry.time).toLocaleString("zh-CN", { hour12: false }) +

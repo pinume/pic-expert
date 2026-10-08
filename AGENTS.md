@@ -43,3 +43,19 @@ Provide a brief summary upon completion:
 
 Writing style follows ASD-STE100 (approx. 80%): Use short sentences. One topic per sentence. Use active voice. Keep terminology consistent. Do not use ambiguous words. Use numbered lists for procedural steps, with one action per step.
 
+## Agent skills
+
+### Issue tracker
+
+Track issues and specs in GitHub Issues for `pinume/pic-expert`.
+Before tracker operations, read `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five default triage labels.
+Before triage, read `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use a single-context layout: root `CONTEXT.md` and `docs/adr/`.
+Before codebase exploration, read `docs/agents/domain.md`.

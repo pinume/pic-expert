@@ -75,3 +75,35 @@ test("20,000 stored order records do not enlarge metadata or popup-sized log rea
   assert.equal((await h.store.rows("T1")).length,20000);
   assert.equal(h.writes.length,1);
 });
+
+test("legacy in-flight identity migrates once without losing rows, checkpoint or logs", async () => {
+  const identity = { orderNo: "O2", referenceNo: "R2" };
+  const h = fixture({ ...task(), checkpoint: { page: 2, total: 4 }, currentRow: identity,
+    manifestRows: [{ orderNo: "O1", referenceNo: "R1", result: "成功" }], logs: [{ message: "retained" }] });
+  const migrated = await h.store.getTask();
+  assert.deepEqual(migrated.currentRows, [identity]);
+  assert.equal(migrated.currentRow, undefined);
+  assert.deepEqual(migrated.checkpoint, { page: 2, total: 4 });
+  assert.equal(migrated.completed, 1);
+  const restarted = new TaskStore(h.storage, h.name);
+  assert.deepEqual((await restarted.getTask()).currentRows, [identity]);
+  assert.equal((await restarted.logs("T1", Infinity)).length, 1);
+  (await h.store.open()).close(); (await restarted.open()).close();
+});
+
+test("IndexedDB metadata migration failure preserves the old record and can retry", async () => {
+  const h = fixture();
+  const oldTask = { ...task(), currentRow: { orderNo: "O1", referenceNo: "R1" } };
+  await h.store.save(oldTask);
+  const restarted = new TaskStore(h.storage, h.name);
+  const commit = restarted.commit.bind(restarted);
+  restarted.commit = async () => { throw new Error("migration failed"); };
+  await assert.rejects(restarted.getTask(), /migration failed/);
+  assert.deepEqual(await h.store.read("tasks", "T1"), oldTask);
+  assert.deepEqual(h.value(), { id: "T1", storeVersion: 1 });
+  restarted.commit = commit;
+  const migrated = await restarted.getTask();
+  assert.deepEqual(migrated.currentRows, [oldTask.currentRow]);
+  assert.equal(migrated.currentRow, undefined);
+  (await h.store.open()).close(); (await restarted.open()).close();
+});

@@ -1,66 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const vm = require("node:vm");
-const fs = require("node:fs");
-const pageCore = require("../page-core.js");
-const fileCore = require("../core.js");
-
-function harness(pages, options = {}) {
-  let listener, currentFilters = options.filters || { status: [], beginTransDate: "20261001", endTransDate: "20261004" }, pauseAfterRow = false;
-  const messages = [], calls = [];
-  const context = {
-    url: "https://portal.test/app#/auditOfTrade2026", filters: currentFilters, size: 2
-  };
-  const siteApi = {
-    MATERIAL_MODIFICATION: new Set(["04", "08", "H03", "S03"]),
-    context: () => ({ ...context, filters: currentFilters, visiblePage: options.visiblePage || {
-      page: 1, total: pages.reduce((count, rows) => count + rows.length, 0), signature: pages[0].map(row => row.merOrderId + "::" + row.transRef).join("\n")
-    } }),
-    isReady: () => true,
-    signature: rows => rows.map(row => row.merOrderId + "::" + row.transRef).join("\n"),
-    makeClient: () => ({
-      async list(filters, page, size) {
-        calls.push({ filters, page, size });
-        return { rows: pages[page] || [], total: pages.reduce((count, rows) => count + rows.length, 0) };
-      },
-      async assets(row) {
-        return options.assets?.(row) || Object.fromEntries(fileCore.ASSET_KINDS.map(kind =>
-          [kind, { url: fileCore.REQUIRED_KINDS.includes(kind) ? "https://portal.test/" + kind : null, ambiguous: false }]));
-      }
-    })
-  };
-  const chrome = { runtime: {
-    onMessage: { addListener: fn => { listener = fn; } },
-    sendMessage: async message => {
-      messages.push(message);
-      options.onMessage?.(message, value => { currentFilters = value; });
-      if (message.type === "PIC_EXPERT_MANIFEST_ROW" && pauseAfterRow) listener({ type: "PIC_EXPERT_PAUSE" }, {}, () => {});
-      if (message.type === "PIC_EXPERT_DOWNLOAD_PAIR") return { ok: true, files: {} };
-      return { ok: true };
-    }
-  } };
-  const sandbox = {
-    document: { querySelectorAll: () => [] }, Element: class {},
-    PIC_EXPERT_PAGE_CORE: pageCore, PIC_EXPERT_CORE: fileCore, PIC_EXPERT_SITE_API: siteApi,
-    chrome, location: { href: context.url, origin: "https://portal.test", hash: "#/auditOfTrade2026" },
-    localStorage: { getItem: () => "session" }, console, URL, AbortSignal, Blob,
-    fetch: async () => ({ ok: true, blob: async () => new Blob([new Uint8Array([0xff, 0xd8, 0xff])]) }),
-    FileReader: class { readAsDataURL(blob) { this.result = "data:" + blob.type + ";base64,/9j/"; this.onload(); } },
-    Date, setTimeout, clearTimeout, Promise, Map, Set, Object, Array, String, Error
-  };
-  sandbox.module = { exports: {} };
-  sandbox.globalThis = sandbox;
-  vm.runInNewContext(fs.readFileSync(require.resolve("../content.js"), "utf8"), sandbox);
-  const exposed = sandbox.module.exports;
-  return {
-    messages, calls, context, exposed,
-    run: (taskId, checkpoint) => exposed.run(taskId, checkpoint),
-    changeFilters: value => { currentFilters = value; },
-    pauseAfterNextRow: () => { pauseAfterRow = true; },
-    rowStatus: listener
-  };
-}
-const row = (order, reference, status = "S02") => ({ merOrderId: order, transRef: reference, status, id: "id-" + order, mchntId: "merchant" });
+const { harness, row } = require("./content-harness.cjs");
 
 test("all API pages are processed and material modification statuses are skipped", async () => {
   const h = harness([[row("O1", "R1", "08"), row("O2", "R2")], [row("O3", "R3")]]);
@@ -100,7 +40,7 @@ test("a changed query filter stops before processing the next order", async () =
     onMessage: (message, setFilters) => { if (message.type === "PIC_EXPERT_MANIFEST_ROW") setFilters({ status: ["01"] }); }
   });
   await h.run("T1");
-  assert.equal(h.messages.filter(item => item.type === "PIC_EXPERT_ROW_BEGIN").length, 1);
+  assert.equal(h.messages.filter(item => item.type === "PIC_EXPERT_ROW_BEGIN").length, 2);
   assert.match(h.messages.at(-1).error, /查询条件或页面发生变化/);
 });
 
@@ -123,7 +63,7 @@ test("authentication failure stops the task instead of marking every order faile
     assets: () => { const error = new Error("登录状态已失效"); error.auth = true; throw error; }
   });
   await h.run("T1");
-  assert.equal(h.messages.filter(message => message.type === "PIC_EXPERT_ROW_BEGIN").length, 1);
+  assert.equal(h.messages.filter(message => message.type === "PIC_EXPERT_ROW_BEGIN").length, 2);
   assert.equal(h.messages.some(message => message.type === "PIC_EXPERT_MANIFEST_ROW"), false);
   assert.equal(h.messages.at(-1).status, "failed");
 });
@@ -132,6 +72,82 @@ test("pause is saved at the order boundary", async () => {
   const h = harness([[row("O1", "R1"), row("O2", "R2")]]);
   h.pauseAfterNextRow();
   await h.run("T1");
-  assert.equal(h.messages.filter(message => message.type === "PIC_EXPERT_ROW_BEGIN").length, 1);
+  assert.equal(h.messages.filter(message => message.type === "PIC_EXPERT_ROW_BEGIN").length, 2);
   assert.equal(h.messages.at(-1).type, "PIC_EXPERT_TASK_PAUSED");
+});
+
+test("image authentication errors stop before the next order even when another image fails first", async () => {
+  for (const status of [401, 403]) {
+    const requests = [];
+    const h = harness([[row("O1", "R1"), row("O2", "R2")]], {
+      fetch: async url => {
+        requests.push(url);
+        return { ok: false, status: url.endsWith("SN码") ? 404 : status };
+      }
+    });
+    await h.run("T1");
+    assert.equal(h.messages.filter(m => m.type === "PIC_EXPERT_ROW_BEGIN").length, 2);
+    assert.equal(h.messages.some(m => m.type === "PIC_EXPERT_MANIFEST_ROW"), false);
+    assert.equal(h.messages.some(m => m.type === "PIC_EXPERT_DOWNLOAD_PAIR"), false);
+    assert.equal(h.messages.at(-1).status, "failed");
+    assert.match(h.messages.at(-1).error, /登录/);
+    assert.ok(requests.length >= 2 && requests.length <= 4);
+  }
+});
+
+test("resume rescans every page, retries failures and missing files, and preserves good downloads and CSV totals", async () => {
+  require("fake-indexeddb/auto");
+  const { TaskStore } = require("../store.js");
+  const { harness: background } = require("./background-harness.cjs");
+  let pointer;
+  const store = new TaskStore({
+    get: async () => ({ picExpertTask: pointer }),
+    set: async value => { pointer = value.picExpertTask; }
+  }, "resume-test-" + process.pid);
+  const options = { store, failInvoice: "R1" };
+  const backend = background(options);
+  const { task } = await backend.begin();
+  const pages = [[row("O1", "R1"), row("O2", "R2")], [row("O3", "R3"), row("O4", "R4", "08")]];
+  const h = harness(pages, {
+    sendMessage: backend.send,
+    onMessage: message => { if (message.type === "PIC_EXPERT_MANIFEST_ROW") options.failInvoice = false; }
+  });
+  try {
+    await h.run(task.id);
+    const finished = await store.getTask();
+    assert.equal(finished.status, "completed");
+    assert.equal(finished.checkpoint.page, 2);
+    assert.equal(finished.failed, 1);
+    const goodPair = await store.getPair(task.id, "R3");
+    const lostPair = await store.getPair(task.id, "R2");
+    backend.items.get(lostPair.files["SN码"].downloadId).exists = false;
+    const before = backend.calls.length;
+    const resumed = await backend.send({ type: "PIC_EXPERT_TASK_RESUME", tabId: 7, frameId: 4 }, {});
+    assert.equal(resumed.ok, true);
+    assert.equal(resumed.task.id, task.id);
+    assert.equal(resumed.task.folderName, task.folderName);
+    await h.run(task.id, resumed.task.checkpoint);
+    const finalTask = await store.getTask();
+    assert.equal(finalTask.status, "completed");
+    assert.deepEqual([finalTask.scanned, finalTask.completed, finalTask.skipped, finalTask.failed], [4, 3, 1, 0]);
+    assert.equal((await store.rows(task.id)).length, 4);
+    assert.deepEqual(await store.getPair(task.id, "R3"), goodPair);
+    const newCalls = backend.calls.slice(before);
+    assert.equal(newCalls.length, 5);
+    assert.ok(newCalls.slice(0, 4).every(call => /\/(R1|R2)\//.test(call.filename)));
+    const manifests = backend.calls.filter(call => call.filename.endsWith(".csv"));
+    assert.equal(manifests.length, 2);
+    assert.equal(manifests[0].filename, manifests[1].filename);
+    assert.equal(manifests[1].conflictAction, "overwrite");
+    const csv = decodeURIComponent(manifests[1].url.split(",").slice(1).join(","));
+    assert.equal(csv, "\uFEFF订单号,参考号,处理结果,原因\r\nO1,R1,成功,\r\nO2,R2,成功,\r\nO3,R3,成功,\r\nO4,R4,跳过,材料修改");
+    assert.equal((await backend.send({ type: "PIC_EXPERT_TASK_RESUME", tabId: 7, frameId: 4 }, {})).ok, false);
+  } finally { (await store.open()).close(); }
+});
+
+test("changed checkpoint page stops before retrying earlier pages", async () => {
+  const h = harness([[row("O1", "R1"), row("O2", "R2")], [row("O3", "R3")]]);
+  await h.run("T1", { url: h.context.url, page: 2, total: 3, signature: "wrong", filters: [], size: 2, visitedBefore: 2 });
+  assert.equal(h.messages.some(m => m.type === "PIC_EXPERT_ROW_BEGIN"), false);
+  assert.match(h.messages.at(-1).error, /断点页订单集合/);
 });

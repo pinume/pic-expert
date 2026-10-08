@@ -45,3 +45,18 @@ test("popup hides the end notice while the task is running", async () => {
   const elements = await loadPopup({ status: "running", scanned: 1, completed: 0, skipped: 0, failed: 0, logs: [] });
   assert.equal(elements.get("#completion").hidden, true);
 });
+
+test("completed tasks expose continuation only when orders failed and a checkpoint exists", async () => {
+  for (const [failed, checkpoint, hidden] of [[1, { total: 2 }, false], [0, { total: 2 }, true], [1, null, true]]) {
+    const elements = await loadPopup({ status: "completed", failed, checkpoint, logs: [] });
+    assert.equal(elements.get("#resume").hidden, hidden);
+  }
+});
+
+test("popup displays confirmed totals and all in-flight orders, including a zero total", async () => {
+  const active = await loadPopup({ status: "running", total: 10, page: 1, scanned: 2, completed: 1, skipped: 1, failed: 0,
+    currentRows: [{}, {}, {}], logs: [] });
+  assert.equal(active.get("#progress").textContent, "订单总数 10 · 页 1 · 已处理 2 · 正在处理 3 · 成功 1 · 跳过 1 · 失败 0");
+  const empty = await loadPopup({ status: "running", total: 0, currentRows: [], logs: [] });
+  assert.match(empty.get("#progress").textContent, /^订单总数 0 /);
+});
