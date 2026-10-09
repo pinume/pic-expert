@@ -1,0 +1,10 @@
+{
+  "error": "{\"code\":-32000,\"message\":\"Action can only be triggered on a tab target.\"}",
+  "events": [
+    {
+      "path": "/uisportal/api/uis-tradein-server/portal/yjhx/v3/queryList",
+      "uuid": null,
+      "session": "valid"
+    }
+  ]
+}

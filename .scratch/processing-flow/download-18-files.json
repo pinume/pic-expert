@@ -1,0 +1,17 @@
+{
+  "folder": "/Users/carrot/Downloads/pic-expert/20260924-20260925_20261009-221338-ef4b9741-71f4-49f1-90ee-21315e1c40b1",
+  "folders": 18,
+  "images": 36,
+  "csvRows": 18,
+  "csvColumns": [
+    "订单号",
+    "参考号",
+    "处理结果",
+    "原因"
+  ],
+  "csvSuccess": 18,
+  "folderReferencesMatchCSV": true,
+  "requiredImagesEveryFolder": true,
+  "invalidImageHeaders": [],
+  "partialFiles": 0
+}

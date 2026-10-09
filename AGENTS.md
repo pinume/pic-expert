@@ -47,7 +47,7 @@ Writing style follows ASD-STE100 (approx. 80%): Use short sentences. One topic p
 
 ### Issue tracker
 
-Track issues and specs in GitHub Issues for `pinume/pic-expert`.
+Track issues and specs in local markdown files under `.scratch/`.
 Before tracker operations, read `docs/agents/issue-tracker.md`.
 
 ### Triage labels

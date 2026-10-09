@@ -1,0 +1,29 @@
+{
+  "outcome": "passed",
+  "browser": "Chrome/155.0.8059.40",
+  "scope": "isolated localhost fixture; real Chrome extension APIs, IndexedDB, downloads and popup entry points; fixed 3 orders",
+  "paused": {
+    "completed": 2,
+    "failed": 1
+  },
+  "finished": {
+    "completed": 3,
+    "failed": 0
+  },
+  "files": 9,
+  "csv": 1,
+  "duplicateDownloads": 0,
+  "taskDir": "/tmp/pic-export-login-e2e-qIU9m3/downloads/pic-expert/20261001-20261009_20261009-203052-2f7512af-3415-46ff-954b-e74e7b797535",
+  "extensionManifestDifference": "localhost host permission only; runtime sources byte-identical",
+  "checks": [
+    "automatic HTTP 401 pause",
+    "saved files survive",
+    "page reload and fresh login token",
+    "same task and folder",
+    "completed orders not read or downloaded again",
+    "all filenames and bytes match",
+    "numbered required images",
+    "optional proof image",
+    "material modification CSV note"
+  ]
+}
