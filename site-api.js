@@ -9,13 +9,16 @@
     ["已退回/商家审核未通过", ["08"]], ["已退回/核销未通过", ["H03"]],
     ["已退回/审核未通过", ["S03"]], ["已退回/审核已终止", ["S04"]]
   ]);
-  const MATERIAL_MODIFICATION = new Set(["04", "08", "H03", "S03"]);
   const clean = value => String(value ?? "").replace(/\s+/g, " ").trim();
   const parseJson = value => typeof value === "string" ? JSON.parse(value) : value;
-  const parseRange = (value, name, required = false) => {
-    if (!value && !required) return null;
+  const parseRange = (value, name) => {
+    if (!value) throw new Error(name + "不能为空。");
     const parts = String(value).split("~").map(part => part.trim().replace(/\//g, ""));
     if (parts.length !== 2 || parts.some(part => !/^\d{8}$/.test(part))) throw new Error(name + "格式无法识别。");
+    if (parts[0] > parts[1] || parts.some(part => {
+      const date = new Date(part.slice(0, 4) + "-" + part.slice(4, 6) + "-" + part.slice(6, 8) + "T00:00:00Z");
+      return !Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10).replace(/-/g, "") !== part;
+    })) throw new Error(name + "范围无效。");
     return parts;
   };
   const byLabel = (doc, label) => [...doc.querySelectorAll(".search-item")].find(item =>
@@ -38,17 +41,13 @@
     }))];
   };
   const readQuery = doc => {
-    const tradeRange = parseRange(inputValue(doc, "交易日期"), "交易日期", true);
-    const settlementRange = parseRange(inputValue(doc, "提交日期"), "提交日期");
+    const tradeRange = parseRange(inputValue(doc, "交易日期"), "交易日期");
     const statusItem = byLabel(doc, "订单状态");
     if (!statusItem) throw new Error("无法识别订单状态筛选。");
     const params = {
-      merOrderId: inputValue(doc, "订单号"),
-      transRef: inputValue(doc, "参考号"),
       beginTransDate: tradeRange[0], endTransDate: tradeRange[1],
       status: selectedStatuses(statusItem)
     };
-    if (settlementRange) [params.beginTime, params.endTime] = settlementRange;
     return params;
   };
   const visiblePage = doc => {
@@ -77,7 +76,8 @@
     const sizeText = doc.querySelector(".el-pagination__sizes select, .el-pagination__sizes .el-input__inner")?.value;
     const size = Number(String(sizeText || "").match(/^\s*(\d+)/)?.[1]);
     if (!Number.isInteger(size) || size < 1) throw new Error("无法识别订单分页大小。");
-    return { url: location.href, filters: readQuery(doc), size, visiblePage: visiblePage(doc) };
+    return { url: location.href, filters: readQuery(doc), size, listSize: 10000, visiblePage: visiblePage(doc),
+      hasOtherFilters: ["订单号", "参考号", "提交日期"].some(label => Boolean(inputValue(doc, label))) };
   };
   const isReady = (doc, location) => {
     try {
@@ -101,6 +101,7 @@
         body: JSON.stringify(body)
       });
     } catch (error) {
+      if (error.auth || error.fatal || error.name === "AbortError") throw error;
       throw new Error(error.name === "TimeoutError" ? "网站接口请求超时。" : "网站接口连接失败。");
     }
     if (!response.ok) {
@@ -126,7 +127,11 @@
     return result.data;
   };
   const makeClient = (token, fetcher) => {
-    if (!token) throw new Error("登录状态已失效，请重新登录并恢复原查询。");
+    if (!token) {
+      const error = new Error("登录状态已失效，请重新登录并恢复原查询。");
+      error.auth = true;
+      throw error;
+    }
     return {
       async list(filters, current, size) {
         const data = await request("portal/yjhx/v3/queryList", { ...filters, current, size }, token, fetcher);
@@ -151,10 +156,7 @@
           const url = imageUrl(value, origin, token);
           (found[kind] ||= new Set()).add(url);
         }
-        return Object.fromEntries([...globalThis.PIC_EXPERT_CORE.ASSET_KINDS].map(kind => {
-          const urls = [...(found[kind] || [])];
-          return [kind, { url: urls.length === 1 ? urls[0] : null, ambiguous: urls.length > 1 }];
-        }));
+        return Object.fromEntries(globalThis.PIC_EXPERT_CORE.ASSET_KINDS.map(kind => [kind, [...(found[kind] || [])]]));
       }
     };
   };
@@ -167,6 +169,6 @@
     url.searchParams.set("userPortalToken", token);
     return url.href;
   };
-  globalThis.PIC_EXPERT_SITE_API = Object.freeze({ context, isReady, signature, makeClient, imageUrl, MATERIAL_MODIFICATION });
+  globalThis.PIC_EXPERT_SITE_API = Object.freeze({ context, isReady, signature, makeClient, imageUrl });
   if (typeof module !== "undefined" && module.exports) module.exports = globalThis.PIC_EXPERT_SITE_API;
 })();

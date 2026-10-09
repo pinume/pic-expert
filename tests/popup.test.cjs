@@ -5,13 +5,14 @@ const fs = require("node:fs");
 
 const loadPopup = async task => {
   const elements = new Map(["#start", "#stop", "#retry", "#pause", "#resume", "#export-logs", "#status",
-    "#progress", "#completion", "#error", "#logs", "#copy-logs", "#copy-status"].map(selector => [selector, {
+    "#progress", "#completion", "#error", "#interruption", "#logs", "#copy-logs", "#copy-status"].map(selector => [selector, {
     hidden: false, disabled: false, textContent: "", value: "", dataset: {}, scrollHeight: 0,
     addEventListener() {}, focus() {}, select() {}
   }]));
   const sandbox = {
     document: { querySelector: selector => elements.get(selector), execCommand: () => true },
-    chrome: { runtime: { sendMessage: async () => ({ ok: true, task }) } },
+    chrome: { runtime: { sendMessage: async () => ({ ok: true, task }) }, tabs: { query: async () => [] } },
+    location: { search: "" }, URLSearchParams,
     navigator: { clipboard: { writeText: async () => {} } },
     window: { addEventListener() {} },
     setInterval: () => 1, clearInterval() {}, Date, console
@@ -44,6 +45,15 @@ test("popup reports failed tasks and manifest errors", async () => {
 test("popup hides the end notice while the task is running", async () => {
   const elements = await loadPopup({ status: "running", scanned: 1, completed: 0, skipped: 0, failed: 0, logs: [] });
   assert.equal(elements.get("#completion").hidden, true);
+});
+
+test("popup distinguishes list reading from material processing and explains auto pause", async () => {
+  const listing = await loadPopup({ status: "running", phase: "listing", listed: 10, total: 20, logs: [] });
+  assert.equal(listing.get("#status").textContent, "正在读取完整订单列表");
+  assert.match(listing.get("#progress").textContent, /列表已读取 10/);
+  const paused = await loadPopup({ status: "paused", error: "登录状态已失效", checkpoint: {}, logs: [] });
+  assert.equal(paused.get("#resume").hidden, false);
+  assert.match(paused.get("#error").textContent, /登录/);
 });
 
 test("completed tasks expose continuation only when orders failed and a checkpoint exists", async () => {

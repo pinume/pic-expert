@@ -7,9 +7,12 @@
     }
     open() {
       this.database ||= new Promise((resolve, reject) => {
-        const request = indexedDB.open(this.databaseName, 1);
-        request.onupgradeneeded = () => {
+        const request = indexedDB.open(this.databaseName, 2);
+        request.onupgradeneeded = event => {
           const db = request.result;
+          const pages = db.createObjectStore("pages", { keyPath: ["taskId", "key"] });
+          pages.createIndex("taskId", "taskId");
+          if (event.oldVersion >= 1) return;
           db.createObjectStore("tasks", { keyPath: "id" });
           for (const name of ["rows", "pairs"]) {
             const store = db.createObjectStore(name, { keyPath: ["taskId", "key"] });
@@ -82,7 +85,7 @@
     async commit(task, changes = {}) {
       const db = await this.open();
       return new Promise((resolve, reject) => {
-        const names = ["tasks", ...["rows", "pairs", "logs"].filter(name => changes[name]?.length)];
+        const names = ["tasks", ...["rows", "pairs", "logs", "pages"].filter(name => changes[name]?.length)];
         const tx = db.transaction(names, "readwrite");
         tx.oncomplete = resolve;
         tx.onabort = () => reject(tx.error || new Error("任务保存失败。"));
@@ -91,6 +94,7 @@
           tx.objectStore("tasks").put(task);
           for (const row of changes.rows || []) tx.objectStore("rows").put({ taskId: task.id, key: JSON.stringify([row.orderNo, row.referenceNo]), value: row });
           for (const pair of changes.pairs || []) tx.objectStore("pairs").put({ taskId: task.id, key: pair.referenceNo, value: pair });
+          for (const page of changes.pages || []) tx.objectStore("pages").put({ taskId: task.id, key: page.page, value: page });
           for (const entry of changes.logs || []) tx.objectStore("logs").add({ taskId: task.id, value: entry });
         } catch (error) { tx.abort(); reject(error); }
       });
@@ -109,6 +113,7 @@
     }
     async getRow(taskId, identity) { return (await this.read("rows", [taskId, JSON.stringify([identity.orderNo, identity.referenceNo])]))?.value || null; }
     async getPair(taskId, referenceNo) { return (await this.read("pairs", [taskId, referenceNo]))?.value || null; }
+    async getPage(taskId, page) { return (await this.read("pages", [taskId, page]))?.value || null; }
     rows(taskId) { return this.records("rows", taskId); }
     pairs(taskId) { return this.records("pairs", taskId); }
     logs(taskId, limit = 500) { return this.records("logs", taskId, limit); }

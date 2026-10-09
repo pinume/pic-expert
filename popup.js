@@ -8,10 +8,22 @@ const statusElement = document.querySelector("#status");
 const progressElement = document.querySelector("#progress");
 const completionElement = document.querySelector("#completion");
 const errorElement = document.querySelector("#error");
+const interruptionElement = document.querySelector("#interruption");
 const logsElement = document.querySelector("#logs");
 const copyLogsButton = document.querySelector("#copy-logs");
 const copyStatusElement = document.querySelector("#copy-status");
 let exportingLogs = false;
+const preferredTabId = Number(new URLSearchParams(location.search).get("tabId")) || null;
+const sourceTab = async resume => {
+  const tabs = await chrome.tabs.query({ url: "https://service.chinaums.com/*" });
+  const task = (await request({ type: "PIC_EXPERT_TASK_STATE" })).task;
+  const id = resume ? task?.tabId : preferredTabId || task?.tabId;
+  const bound = tabs.find(tab => tab.id === id);
+  if (bound) return bound;
+  if (tabs.length === 1) return tabs[0];
+  if (!tabs.length) throw new Error("请先打开银联商务网站，登录并完成订单查询。");
+  throw new Error("打开了多个银联商务页面，无法确定订单来源。请只保留一个订单网站标签页后重试。");
+};
 const request = async message => {
   const response = await chrome.runtime.sendMessage(message);
   if (!response?.ok) throw new Error(response?.error || "后台无响应。");
@@ -20,9 +32,11 @@ const request = async message => {
 const renderTask = task => {
   const labels = { running: "运行中", pausing: "等待在途订单结束后暂停", paused: "已暂停", stopping: "正在停止", finalizing: "正在生成清单", completed: "已完成", failed: "已停止" };
   statusElement.textContent = task ? labels[task.status] || task.status : "未开始";
+  if (task?.status === "running" && task.phase) statusElement.textContent = task.phase === "listing" ? "正在读取完整订单列表" : "正在处理订单资料";
   progressElement.textContent = task ? "订单总数 " + (task.total ?? task.checkpoint?.total ?? "核对中") +
     " · 页 " + task.page + " · 已处理 " + task.scanned + " · 正在处理 " + (task.currentRows?.length || 0) +
     " · 成功 " + task.completed + " · 跳过 " + task.skipped + " · 失败 " + task.failed : "";
+  if (task?.phase === "listing") progressElement.textContent += " · 列表已读取 " + (task.listed || 0);
   const terminal = task && ["completed", "failed"].includes(task.status);
   completionElement.hidden = !terminal;
   completionElement.dataset.status = terminal ? task.status : "";
@@ -31,6 +45,9 @@ const renderTask = task => {
       "，失败 " + task.failed + "。" + (task.manifestError ? "清单下载失败" :
         task.manifestDownloadId !== undefined ? "清单已下载" : "清单状态未知") : "";
   errorElement.textContent = [task?.error, task?.manifestError].filter(Boolean).join("\n");
+  const interrupted = Boolean(task?.error) && ["pausing", "paused"].includes(task?.status);
+  interruptionElement.hidden = !interrupted;
+  interruptionElement.textContent = interrupted ? (task.status === "pausing" ? "任务已中断，正在自动暂停并整理未完成订单。" : "任务已中断并暂停，已完成的文件保留。") + "\n" + task.error : "";
   startButton.disabled = ["running", "pausing", "stopping", "finalizing"].includes(task?.status);
   stopButton.hidden = !["running", "pausing", "paused", "stopping", "finalizing"].includes(task?.status);
   pauseButton.hidden = !["running", "pausing"].includes(task?.status);
@@ -55,8 +72,7 @@ const launch = async resume => {
   errorElement.textContent = "";
   let task;
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) throw new Error("没有可用的当前标签页。");
+    const tab = await sourceTab(resume);
     const injected = await chrome.scripting.executeScript({
       target: { tabId: tab.id, allFrames: true }, files: ["core.js", "page-core.js", "site-api.js", "content.js"]
     });

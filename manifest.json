@@ -2,14 +2,17 @@
   "manifest_version": 3,
   "minimum_chrome_version": "116",
   "name": "Pic Expert",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "按当前查询结果批量下载订单 SN 码、发票及证明材料图片，并生成汇总清单。",
-  "permissions": ["activeTab", "downloads", "scripting", "storage"],
+  "permissions": ["tabs", "downloads", "scripting", "storage"],
+  "host_permissions": ["https://service.chinaums.com/*"],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
     "default_title": "Pic Expert",
-    "default_popup": "popup.html"
-  }
+    "default_popup": "entry.html",
+    "default_icon": "favicon.ico"
+  },
+  "icons": { "16": "favicon.ico", "32": "favicon.ico", "48": "favicon.ico", "128": "favicon.ico" }
 }

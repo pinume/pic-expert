@@ -411,3 +411,35 @@ test("duplicate row messages do not occupy extra slots or double count results",
   await Promise.all(Array.from({ length: 3 }, () => h.send({ type: "PIC_EXPERT_MANIFEST_ROW", taskId: task.id, row })));
   assert.deepEqual([h.task().currentRows.length, h.task().scanned, h.task().skipped], [0, 1, 1]);
 });
+
+test("recovery retains material modification notes for completed numbered files and orders interrupted before saving", async () => {
+  for (const saved of [false, true]) {
+    const h = harness(), { task } = await h.begin();
+    const identity = { orderNo: "O1", referenceNo: "R1" };
+    await h.send({ type: "PIC_EXPERT_ROW_BEGIN", taskId: task.id, identity, note: "材料修改" });
+    if (saved) {
+      const result = await h.send({ type: "PIC_EXPERT_DOWNLOAD_PAIR", taskId: task.id, ...identity, note: "材料修改",
+        assets: { "SN码-2": assets["SN码"], "发票": assets["发票"], "SN码-1": assets["SN码"] } });
+      assert.equal(result.ok, true);
+      assert.deepEqual(h.calls.map(call => call.filename.split("/").at(-1)), ["SN码-1.jpg", "SN码-2.jpg", "发票.png"]);
+    }
+    const restarted = harness({ store: h.store, items: h.items });
+    await restarted.send({ type: "PIC_EXPERT_TASK_STOP" }, {});
+    const result = h.task().manifestRows[0];
+    assert.equal(result.result, saved ? "成功" : "失败");
+    assert.match(result.reason, /材料修改/);
+    if (saved) assert.equal(result.reason, "材料修改");
+    else assert.match(result.reason, /用户停止/);
+    assert.match(decodeURIComponent(restarted.calls[0].url), /材料修改/);
+  }
+});
+
+test("continuation rechecks orders skipped by removed rules and keeps genuine missing-image skips", async () => {
+  for (const [reason, done] of [["材料修改", false], ["SN码或发票图片缺失或不唯一", false], ["SN码或发票图片缺失", true]]) {
+    const h = harness({}, { id: "T1", status: "running", tabId: 7, frameId: 4,
+      manifestRows: [{ orderNo: "O1", referenceNo: "R1", result: "跳过", reason }] });
+    const result = await h.send({ type: "PIC_EXPERT_ROW_STATUS", taskId: "T1", identity: { orderNo: "O1", referenceNo: "R1" } });
+    assert.equal(result.ok, true);
+    assert.equal(result.done, done);
+  }
+});

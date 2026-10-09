@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Pic Expert</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="popup-page">
+  <header class="topbar">
+    <img class="site-logo" src="logo.png" alt="银联商务">
+    <div class="topbar-divider"></div>
+    <div><h1>订单资料助手</h1><p class="subtitle">商户统一服务平台</p></div>
+  </header>
+  <main class="popup-main">
+    <section class="status-card" aria-live="polite">
+      <div class="status-line"><span>任务状态</span><strong id="entry-status">读取中…</strong></div>
+      <p id="entry-progress" class="hint"></p>
+    </section>
+    <button id="open-task" class="primary-button" type="button">打开任务页面</button>
+    <p class="hint entry-hint">先在网站登录并查询订单，再从任务页面开始下载。</p>
+    <div id="entry-error" role="alert"></div>
+  </main>
+  <script src="entry.js"></script>
+</body>
+</html>

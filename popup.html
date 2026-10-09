@@ -3,29 +3,41 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Pic Expert</title>
+  <title>Pic Expert 任务页面</title>
+  <link rel="icon" href="favicon.ico">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <header class="details-header">
+    <div class="header-inner">
+      <img class="site-logo-large" src="logo.png" alt="银联商务">
+      <div class="topbar-divider"></div>
+      <h1>订单资料下载控制台</h1>
+    </div>
+  </header>
   <main>
-    <h1>Pic Expert</h1>
-    <p class="hint">先在订单页面完成登录、日期选择和查询，再开始下载当前查询结果的全部分页。</p>
-    <button id="start" type="button">开始下载</button>
-    <button id="stop" type="button" hidden>停止任务</button>
-    <button id="pause" type="button" hidden>暂停任务</button>
-    <button id="resume" type="button" hidden>继续上次任务</button>
-    <button id="retry" type="button" hidden>重试下载清单</button>
-    <section aria-live="polite">
+    <p class="hint">独立任务页面。刷新网站不会关闭此页。来源网页刷新、跳转或关闭时任务自动暂停；恢复原查询后继续。</p>
+    <p class="hint">先在订单页面登录，选择交易日期和订单状态并查询。日期必填，状态留空表示全部。扩展先读取完整列表，再下载资料；其他筛选项不参与下载范围。</p>
+    <section class="overview-card" aria-live="polite">
+      <div class="card-header"><h2>运行概览</h2></div>
+      <div class="task-actions">
+        <button id="start" class="primary-button" type="button">开始下载</button>
+        <button id="pause" class="secondary-button" type="button" hidden>暂停任务</button>
+        <button id="resume" class="primary-button" type="button" hidden>继续上次任务</button>
+        <button id="stop" class="danger-button" type="button" hidden>停止任务</button>
+        <button id="retry" class="secondary-button" type="button" hidden>重试下载清单</button>
+      </div>
+      <div id="interruption" class="interruption" role="alert" hidden></div>
       <div id="status">未开始</div>
       <div id="progress"></div>
       <div id="completion" class="completion" role="status" aria-live="polite" hidden></div>
       <div id="error" role="alert"></div>
     </section>
-    <details>
+    <details class="overview-card" open>
       <summary>运行日志（最近 500 条）</summary>
       <textarea id="logs" rows="12" readonly aria-label="运行日志"></textarea>
-      <button id="copy-logs" type="button" disabled>复制日志</button>
-      <button id="export-logs" type="button" disabled>导出完整日志</button>
+      <button id="copy-logs" class="secondary-button" type="button" disabled>复制日志</button>
+      <button id="export-logs" class="secondary-button" type="button" disabled>导出完整日志</button>
       <span id="copy-status" role="status"></span>
     </details>
   </main>

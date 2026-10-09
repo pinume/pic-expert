@@ -11,8 +11,8 @@ const field = (label, value = "") => ({
   querySelectorAll: selector => selector === ".el-tag__content" ? [] : []
 });
 const fixtureDocument = (values = {}) => {
-  const fields = [field("提交日期"), field("订单号", values.merOrderId || ""),
-    field("交易日期*", values.dealDate || "2026/01/01 ~ 2026/01/31"), field("参考号", values.transRef || ""),
+  const fields = [field("提交日期", values.submitDate || ""), field("订单号", values.merOrderId || ""),
+    field("交易日期*", values.dealDate ?? "2026/01/01 ~ 2026/01/31"), field("参考号", values.transRef || ""),
     { ...field("订单状态"), querySelector: selector => selector === "label" ? { textContent: "订单状态" } : selector === ".el-input__inner" ? { value: "" } : null,
       querySelectorAll: selector => selector === ".el-tag__content" ? (values.tags || []).map(textContent => ({ textContent })) : [] }];
   const rows = values.rows || [{ orderNo: "O1", referenceNo: "R1" }];
@@ -35,10 +35,32 @@ test("query context maps the current UI filters to the website query fields", ()
     hash: "#/auditOfTrade2026", href: "https://portal.test/app#/auditOfTrade2026"
   });
   assert.deepEqual(context.filters, {
-    merOrderId: "ORDER-1", transRef: "REF-1", beginTransDate: "20260101", endTransDate: "20260131", status: []
+    beginTransDate: "20260101", endTransDate: "20260131", status: []
   });
   assert.equal(context.size, 10);
+  assert.equal(context.listSize, 10000);
   assert.deepEqual(context.visiblePage, { page: 1, total: 1, signature: "O1::R1" });
+  assert.equal(context.hasOtherFilters, true);
+});
+
+test("trade dates are required and valid; unrelated filters never enter the API query", () => {
+  const location = { hash: "#/auditOfTrade2026", href: "https://portal.test/app#/auditOfTrade2026" };
+  for (const dealDate of ["", "2026/02/30 ~ 2026/03/01", "2026/02/01 ~ 2026/01/01"]) {
+    assert.throws(() => site.context(fixtureDocument({ dealDate }), location), /交易日期/);
+  }
+  assert.deepEqual(site.context(fixtureDocument({ merOrderId: "O1", transRef: "R1", submitDate: "invalid", tags: ["审核通过"] }), location).filters,
+    { beginTransDate: "20260101", endTransDate: "20260131", status: ["S02"] });
+});
+
+test("missing token and all known authentication responses retain the authentication flag", async () => {
+  assert.throws(() => site.makeClient(null), error => error.auth === true);
+  for (const reply of [
+    { ok: false, status: 401 }, { ok: false, status: 403 },
+    { ok: true, headers: { get: () => "text/html" } },
+    { ok: true, json: async () => ({ success: false, message: "token已过期" }) }
+  ]) {
+    await assert.rejects(site.makeClient("old", async () => reply).list({}, 0, 10), error => error.auth === true);
+  }
 });
 
 test("pagination size reads Element UI's displayed page-size value", () => {
@@ -96,10 +118,10 @@ test("detail and template responses map labeled image fields to download URLs", 
     "/uisportal/api/uis-tradein-server/portal/yjhx/v3/queryDtl",
     "/uisportal/api/uis-tradein-server/portal/yjhx/v3/queryTemplateInfo/template-1"
   ]);
-  assert.match(assets["SN码"].url, /img\/tradein\/download\/sn-id\?userPortalToken=secret/);
-  assert.match(assets["发票"].url, /img\/tradein\/download\/invoice-id\?userPortalToken=secret/);
-  assert.match(assets["证明材料图三"].url, /img\/tradein\/download\/proof-id\?userPortalToken=secret/);
-  assert.equal(assets["证明材料图一"].url, null);
+  assert.match(assets["SN码"][0], /img\/tradein\/download\/sn-id\?userPortalToken=secret/);
+  assert.match(assets["发票"][0], /img\/tradein\/download\/invoice-id\?userPortalToken=secret/);
+  assert.match(assets["证明材料图三"][0], /img\/tradein\/download\/proof-id\?userPortalToken=secret/);
+  assert.deepEqual(assets["证明材料图一"], []);
 });
 
 test("unknown status tags and rejected API requests fail closed", async () => {
@@ -108,4 +130,19 @@ test("unknown status tags and rejected API requests fail closed", async () => {
   }), /无法安全识别/);
   const client = site.makeClient("secret", async () => ({ ok: true, status: 200, json: async () => ({ success: false, code: "999999" }) }));
   await assert.rejects(client.list({}, 0, 10), /拒绝了请求/);
+});
+
+test("multiple required image addresses are returned in template order with duplicate addresses removed", async () => {
+  const client = site.makeClient("session", async url => {
+    if (url.endsWith("queryDtl")) return response({ templateId: "T", productJson: { s1: "sn1", s2: "sn2", s3: "sn1", i1: "inv1", i2: "inv2" } });
+    return response({ productJson: [{ its: [
+      { type: "img", desc: "SN码", key: "s1" }, { type: "img", desc: "SN码照片", key: "s2" },
+      { type: "img", desc: "SN码图片", key: "s3" }, { type: "img", desc: "发票", key: "i1" },
+      { type: "img", desc: "发票图片", key: "i2" }
+    ] }] });
+  });
+  const found = await client.assets({ id: "O1", mchntId: "merchant" }, "https://portal.test");
+  assert.deepEqual(found["SN码"].map(url => new URL(url).pathname.split("/").at(-1)), ["sn1", "sn2"]);
+  assert.deepEqual(found["发票"].map(url => new URL(url).pathname.split("/").at(-1)), ["inv1", "inv2"]);
+  assert.deepEqual(found["证明材料图三"], []);
 });

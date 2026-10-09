@@ -5,12 +5,12 @@ const fileCore = require("../core.js");
 
 function harness(pages, options = {}) {
   let listener, currentFilters = options.filters || { status: [], beginTransDate: "20261001", endTransDate: "20261004" }, pauseAfterRow = false;
-  const messages = [], calls = [];
+  const messages = [], calls = [], savedPages = new Map();
   const context = {
-    url: "https://portal.test/app#/auditOfTrade2026", filters: currentFilters, size: options.size || 2
+    url: "https://portal.test/app#/auditOfTrade2026", filters: currentFilters, size: options.size || 2,
+    hasOtherFilters: Boolean(options.hasOtherFilters), listSize: options.listSize
   };
   const siteApi = {
-    MATERIAL_MODIFICATION: new Set(["04", "08", "H03", "S03"]),
     context: () => ({ ...context, filters: currentFilters, visiblePage: options.visiblePage || {
       page: 1, total: pages.reduce((count, rows) => count + rows.length, 0), signature: pages[0].map(row => row.merOrderId + "::" + row.transRef).join("\n")
     } }),
@@ -24,7 +24,7 @@ function harness(pages, options = {}) {
       },
       async assets(row) {
         return options.assets?.(row) || Object.fromEntries(fileCore.ASSET_KINDS.map(kind =>
-          [kind, { url: fileCore.REQUIRED_KINDS.includes(kind) ? "https://portal.test/" + row.transRef + "/" + kind : null, ambiguous: false }]));
+          [kind, fileCore.REQUIRED_KINDS.includes(kind) ? ["https://portal.test/" + row.transRef + "/" + kind] : []]));
       }
     })
   };
@@ -35,6 +35,8 @@ function harness(pages, options = {}) {
       options.onMessage?.(message, value => { currentFilters = value; });
       if (message.type === "PIC_EXPERT_MANIFEST_ROW" && pauseAfterRow) listener({ type: "PIC_EXPERT_PAUSE" }, {}, () => {});
       if (options.sendMessage) return options.sendMessage(message);
+      if (message.type === "PIC_EXPERT_LIST_PAGE") savedPages.set(message.page, { page: message.page, rows: message.rows });
+      if (message.type === "PIC_EXPERT_LIST_GET") return { ok: true, page: savedPages.get(message.page) || null };
       if (message.type === "PIC_EXPERT_DOWNLOAD_PAIR") return { ok: true, files: {} };
       return { ok: true };
     }
@@ -43,9 +45,11 @@ function harness(pages, options = {}) {
     document: { querySelectorAll: () => [] }, Element: class {},
     PIC_EXPERT_PAGE_CORE: pageCore, PIC_EXPERT_CORE: fileCore, PIC_EXPERT_SITE_API: siteApi,
     chrome, location: { href: context.url, origin: "https://portal.test", hash: "#/auditOfTrade2026" },
-    localStorage: { getItem: () => "session" }, console, URL, AbortController, AbortSignal, Blob,
+    localStorage: { getItem: () => options.token ? options.token() : "session" }, console, URL, AbortController, AbortSignal, Blob,
     fetch: options.fetch || (async () => ({ ok: true, blob: async () => new Blob([new Uint8Array([0xff, 0xd8, 0xff])]) })),
-    FileReader: class { readAsDataURL(blob) { this.result = "data:" + blob.type + ";base64,/9j/"; this.onload(); } },
+    FileReader: class { readAsDataURL(blob) {
+      blob.arrayBuffer().then(bytes => { this.result = "data:" + blob.type + ";base64," + Buffer.from(bytes).toString("base64"); this.onload(); }, () => this.onerror());
+    } },
     Date, setTimeout, clearTimeout, Promise, Map, Set, Object, Array, String, Error
   };
   sandbox.module = { exports: {} };

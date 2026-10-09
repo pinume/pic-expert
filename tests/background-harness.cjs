@@ -23,14 +23,17 @@ function harness(options = {}, initial = null) {
       get: async () => ({ picExpertTask: structuredClone(stored) }),
       set: async value => { stored = structuredClone(value.picExpertTask); }
     } },
-    runtime: { onMessage: { addListener: f => { listener = f; } } },
-    tabs: { sendMessage: async (_tab, message) => options.pageMessage ? options.pageMessage(message) : ({ ok: true, running: Boolean(options.livePage) }) },
+    runtime: { getURL: file => "chrome-extension://test-extension/" + file, onMessage: { addListener: f => { listener = f; } } },
+    action: { onClicked: { addListener() {} } },
+    tabs: { onUpdated: { addListener() {} }, onRemoved: { addListener() {} },
+      sendMessage: async (_tab, message) => options.pageMessage ? options.pageMessage(message) : ({ ok: true, running: Boolean(options.livePage) }) },
     downloads: {
       onChanged: {addListener:handler=>handlers.add(handler),removeListener:handler=>handlers.delete(handler)},
       download: async args => {
         const id = Math.max(0, ...items.keys()) + 1;
         calls.push(args);
         const failed = (options.failInvoice && args.filename.includes("发票") && (options.failInvoice === true || args.filename.includes("/" + options.failInvoice + "/"))) ||
+          (options.failFilename && args.filename.endsWith(options.failFilename)) ||
           (options.failProof && args.filename.includes(options.failProof)) ||
           (options.failManifest && args.filename.endsWith(".csv"));
         items.set(id, { id, filename: args.filename, state: failed ? "interrupted" : options.holdPair && !args.filename.endsWith(".csv") ? "in_progress" : "complete", exists: !failed, error: failed ? "NETWORK_FAILED" : undefined });

@@ -2,12 +2,89 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { harness, row } = require("./content-harness.cjs");
 
-test("all API pages are processed and material modification statuses are skipped", async () => {
+test("whole-list request is independent of the visible page and completes before assets", async () => {
+  const rows = Array.from({ length: 33 }, (_, i) => row("O" + i, "R" + i));
+  let h;
+  h = harness([rows.slice(0, 10)], {
+    size: 10, listSize: 10000,
+    visiblePage: { page: 2, total: 33, signature: rows.slice(10, 20).map(r => r.merOrderId + "::" + r.transRef).join("\n") },
+    list: () => ({ rows, total: rows.length }),
+    assets: () => { assert.ok(h.messages.some(m => m.type === "PIC_EXPERT_LIST_COMPLETE")); }
+  });
+  await h.run("T1");
+  assert.deepEqual(h.calls.map(({ page, size }) => ({ page, size })), [{ page: 0, size: 10000 }]);
+  assert.equal(h.messages.filter(m => m.type === "PIC_EXPERT_MANIFEST_ROW").length, 33);
+  assert.equal(h.messages.at(-1).status, "completed");
+});
+
+test("whole-list truncation or duplicate identities pause before reading assets", async () => {
+  for (const rows of [[row("O1", "R1")], [row("O1", "R1"), row("O1", "R1")]]) {
+    const h = harness([rows], { listSize: 10000, hasOtherFilters: true, list: () => ({ rows, total: 2 }) });
+    await h.run("T1");
+    assert.equal(h.messages.some(m => m.type === "PIC_EXPERT_ROW_BEGIN"), false);
+    assert.equal(h.messages.at(-1).type, "PIC_EXPERT_TASK_AUTO_PAUSE");
+  }
+});
+
+test("whole-list continuation keeps the saved request size and skips completed orders", async () => {
+  const rows = [row("O1", "R1"), row("O2", "R2"), row("O3", "R3")];
+  const pages = new Map(), completed = new Set();
+  const h = harness([rows.slice(0, 2)], {
+    listSize: 10000, list: () => ({ rows, total: 3 }),
+    visiblePage: { page: 1, total: 3, signature: "O1::R1\nO2::R2" },
+    sendMessage: async m => {
+      if (m.type === "PIC_EXPERT_LIST_PAGE") pages.set(m.page, { rows: m.rows });
+      if (m.type === "PIC_EXPERT_LIST_GET") return { ok: true, page: pages.get(m.page) || null };
+      if (m.type === "PIC_EXPERT_ROW_STATUS") return { ok: true, done: completed.has(m.identity.orderNo) };
+      if (m.type === "PIC_EXPERT_MANIFEST_ROW") completed.add(m.row.orderNo);
+      return { ok: true, files: {} };
+    }
+  });
+  await h.run("T1");
+  const checkpoint = h.messages.findLast(m => m.type === "PIC_EXPERT_CHECKPOINT").checkpoint;
+  await h.run("T1", checkpoint);
+  assert.deepEqual(h.calls.map(c => c.size), [10000, 10000]);
+  assert.equal(h.messages.filter(m => m.type === "PIC_EXPERT_DOWNLOAD_PAIR").length, 3);
+  assert.equal(h.messages.at(-1).status, "completed");
+});
+
+test("a larger total causes a second complete request and saves its request size", async () => {
+  const rows = Array.from({ length: 10001 }, (_, i) => row("O" + i, "R" + i));
+  let h;
+  h = harness([rows.slice(0, 10)], {
+    size: 10, listSize: 10000, hasOtherFilters: true,
+    list: (_filters, _page, size) => ({ rows: rows.slice(0, size), total: rows.length }),
+    onMessage: m => { if (m.type === "PIC_EXPERT_LIST_COMPLETE") h.rowStatus({ type: "PIC_EXPERT_PAUSE" }, {}, () => {}); }
+  });
+  await h.run("T1");
+  assert.deepEqual(h.calls.map(c => c.size), [10000, 10001]);
+  assert.equal(h.messages.find(m => m.type === "PIC_EXPERT_LIST_PAGE").rows.length, 10001);
+  assert.ok(h.messages.some(m => m.type === "PIC_EXPERT_CHECKPOINT" && m.checkpoint.size === 10001));
+  assert.equal(h.messages.at(-1).type, "PIC_EXPERT_TASK_PAUSED");
+});
+
+test("all API pages and previously excluded statuses are processed", async () => {
   const h = harness([[row("O1", "R1", "08"), row("O2", "R2")], [row("O3", "R3")]]);
   await h.run("T1");
   assert.deepEqual(h.calls.map(call => call.page), [0, 1]);
-  assert.deepEqual(h.messages.filter(message => message.type === "PIC_EXPERT_MANIFEST_ROW").map(message => message.row.result), ["跳过", "成功", "成功"]);
+  assert.deepEqual(h.messages.filter(message => message.type === "PIC_EXPERT_MANIFEST_ROW").map(message => message.row.result), ["成功", "成功", "成功"]);
   assert.equal(h.messages.at(-1).status, "completed");
+});
+
+test("material modification is a CSV note on success, missing required images and failures", async () => {
+  for (const mode of ["success", "missing", "failure"]) {
+    const h = harness([[{ ...row("O1", "R1", "H03"), statusDesc: "材料修改" }]], {
+      assets: () => {
+        if (mode === "failure") throw new Error("读取详情失败");
+        return { "SN码": ["https://portal.test/sn"], "发票": mode === "missing" ? [] : ["https://portal.test/invoice"],
+          "证明材料图一": [], "证明材料图二": [], "证明材料图三": [] };
+      }
+    });
+    await h.run("T1");
+    const result = h.messages.find(message => message.type === "PIC_EXPERT_MANIFEST_ROW").row;
+    assert.equal(result.result, { success: "成功", missing: "跳过", failure: "失败" }[mode]);
+    assert.equal(result.reason, { success: "材料修改", missing: "材料修改；SN码或发票图片缺失", failure: "材料修改；读取详情失败" }[mode]);
+  }
 });
 
 test("page probe exposes the queried trade date interval", () => {
@@ -22,7 +99,7 @@ test("page probe exposes the queried trade date interval", () => {
 test("duplicate identities across API pages stop the task", async () => {
   const h = harness([[row("O1", "R1"), row("O2", "R2")], [row("O1", "R1")]]);
   await h.run("T1");
-  assert.equal(h.messages.at(-1).status, "failed");
+  assert.equal(h.messages.at(-1).type, "PIC_EXPERT_TASK_AUTO_PAUSE");
   assert.match(h.messages.at(-1).error, /重复订单身份/);
 });
 
@@ -33,6 +110,17 @@ test("API results that do not match the displayed query stop before order proces
   await h.run("T1");
   assert.equal(h.messages.some(message => message.type === "PIC_EXPERT_ROW_BEGIN"), false);
   assert.match(h.messages.at(-1).error, /与页面当前查询不一致/);
+});
+
+test("other website filters do not narrow the date-and-status list or block its complete processing", async () => {
+  const h = harness([[row("O1", "R1"), row("O2", "R2")], [row("O3", "R3")]], {
+    hasOtherFilters: true,
+    visiblePage: { page: 1, total: 1, signature: "O1::R1" }
+  });
+  await h.run("T1");
+  assert.deepEqual(h.calls.map(call => call.page), [0, 1]);
+  assert.equal(h.messages.filter(message => message.type === "PIC_EXPERT_MANIFEST_ROW").length, 3);
+  assert.equal(h.messages.at(-1).status, "completed");
 });
 
 test("a changed query filter stops before processing the next order", async () => {
@@ -48,13 +136,14 @@ test("resume verifies the API query and checkpoint page signature", async () => 
   const h = harness([[row("O1", "R1"), row("O2", "R2")] ]);
   await h.run("T1", { url: h.context.url, page: 1, total: 2, signature: "wrong", filters: [], query: { status: ["01"] }, size: 2, visitedBefore: 0 });
   assert.equal(h.calls.length, 0);
-  assert.equal(h.messages.at(-1).status, "failed");
+  assert.equal(h.messages.at(-1).type, "PIC_EXPERT_TASK_AUTO_PAUSE");
   assert.match(h.messages.at(-1).error, /查询与断点不同/);
 });
 
 test("legacy checkpoints continue only when the saved page still matches", async () => {
-  const h = harness([[row("O1", "R1"), row("O2", "R2")] ]);
-  await h.run("T1", { url: h.context.url, page: 1, total: 2, signature: "O1::R1\nO2::R2", filters: [], visitedBefore: 0 });
+  const h = harness([[row("O1", "R1"), row("O2", "R2")], [row("O3", "R3")]], { listSize: 10000 });
+  await h.run("T1", { url: h.context.url, page: 1, total: 3, signature: "O1::R1\nO2::R2", filters: [], visitedBefore: 0 });
+  assert.deepEqual(h.calls.map(c => c.size), [2, 2]);
   assert.equal(h.messages.at(-1).status, "completed");
 });
 
@@ -65,7 +154,7 @@ test("authentication failure stops the task instead of marking every order faile
   await h.run("T1");
   assert.equal(h.messages.filter(message => message.type === "PIC_EXPERT_ROW_BEGIN").length, 2);
   assert.equal(h.messages.some(message => message.type === "PIC_EXPERT_MANIFEST_ROW"), false);
-  assert.equal(h.messages.at(-1).status, "failed");
+  assert.equal(h.messages.at(-1).type, "PIC_EXPERT_TASK_AUTO_PAUSE");
 });
 
 test("pause is saved at the order boundary", async () => {
@@ -89,7 +178,7 @@ test("image authentication errors stop before the next order even when another i
     assert.equal(h.messages.filter(m => m.type === "PIC_EXPERT_ROW_BEGIN").length, 2);
     assert.equal(h.messages.some(m => m.type === "PIC_EXPERT_MANIFEST_ROW"), false);
     assert.equal(h.messages.some(m => m.type === "PIC_EXPERT_DOWNLOAD_PAIR"), false);
-    assert.equal(h.messages.at(-1).status, "failed");
+    assert.equal(h.messages.at(-1).type, "PIC_EXPERT_TASK_AUTO_PAUSE");
     assert.match(h.messages.at(-1).error, /登录/);
     assert.ok(requests.length >= 2 && requests.length <= 4);
   }
@@ -129,7 +218,7 @@ test("resume rescans every page, retries failures and missing files, and preserv
     await h.run(task.id, resumed.task.checkpoint);
     const finalTask = await store.getTask();
     assert.equal(finalTask.status, "completed");
-    assert.deepEqual([finalTask.scanned, finalTask.completed, finalTask.skipped, finalTask.failed], [4, 3, 1, 0]);
+    assert.deepEqual([finalTask.scanned, finalTask.completed, finalTask.skipped, finalTask.failed], [4, 4, 0, 0]);
     assert.equal((await store.rows(task.id)).length, 4);
     assert.deepEqual(await store.getPair(task.id, "R3"), goodPair);
     const newCalls = backend.calls.slice(before);
@@ -140,7 +229,7 @@ test("resume rescans every page, retries failures and missing files, and preserv
     assert.equal(manifests[0].filename, manifests[1].filename);
     assert.equal(manifests[1].conflictAction, "overwrite");
     const csv = decodeURIComponent(manifests[1].url.split(",").slice(1).join(","));
-    assert.equal(csv, "\uFEFF订单号,参考号,处理结果,原因\r\nO1,R1,成功,\r\nO2,R2,成功,\r\nO3,R3,成功,\r\nO4,R4,跳过,材料修改");
+    assert.equal(csv, "\uFEFF订单号,参考号,处理结果,原因\r\nO1,R1,成功,\r\nO2,R2,成功,\r\nO3,R3,成功,\r\nO4,R4,成功,");
     assert.equal((await backend.send({ type: "PIC_EXPERT_TASK_RESUME", tabId: 7, frameId: 4 }, {})).ok, false);
   } finally { (await store.open()).close(); }
 });

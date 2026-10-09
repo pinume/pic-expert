@@ -107,3 +107,43 @@ test("IndexedDB metadata migration failure preserves the old record and can retr
   assert.equal(migrated.currentRow, undefined);
   (await h.store.open()).close(); (await restarted.open()).close();
 });
+
+test("version 1 database upgrade retains tasks, results, files and logs while adding persisted list pages", async () => {
+  const h = fixture();
+  const old = await new Promise((resolve, reject) => {
+    const request = indexedDB.open(h.name, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      db.createObjectStore("tasks", { keyPath: "id" });
+      for (const name of ["rows", "pairs"]) {
+        db.createObjectStore(name, { keyPath: ["taskId", "key"] }).createIndex("taskId", "taskId");
+      }
+      const logs = db.createObjectStore("logs", { keyPath: "id", autoIncrement: true });
+      logs.createIndex("taskId", "taskId"); logs.createIndex("sequence", ["taskId", "id"]);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  await new Promise((resolve, reject) => {
+    const tx = old.transaction(["tasks", "rows", "pairs", "logs"], "readwrite");
+    tx.objectStore("tasks").put({ ...task(), currentRows: [] });
+    tx.objectStore("rows").put({ taskId: "T1", key: '["O1","R1"]', value: { orderNo: "O1", referenceNo: "R1", result: "成功" } });
+    tx.objectStore("pairs").put({ taskId: "T1", key: "R1", value: { referenceNo: "R1", status: "complete", files: { "SN码": { downloadId: 1 } } } });
+    tx.objectStore("logs").add({ taskId: "T1", value: { message: "retained" } });
+    tx.oncomplete = resolve; tx.onabort = () => reject(tx.error);
+  });
+  old.close();
+  await h.storage.set({ picExpertTask: { id: "T1", storeVersion: 1 } });
+  const saved = await h.store.getTask();
+  const page = { page: 1, rows: [{ merOrderId: "O1", transRef: "R1", id: "id-1", mchntId: "merchant" }] };
+  await h.store.save({ ...saved, listed: 1 }, { pages: [page] });
+  assert.equal((await h.store.open()).version, 2);
+  assert.equal((await h.store.getRow("T1", { orderNo: "O1", referenceNo: "R1" })).result, "成功");
+  assert.equal((await h.store.getPair("T1", "R1")).files["SN码"].downloadId, 1);
+  assert.equal((await h.store.logs("T1"))[0].message, "retained");
+  assert.deepEqual(await h.store.getPage("T1", 1), page);
+  await assert.rejects(h.store.save({ ...saved, listed: 2 }, { pages: [{ page: 2, rows: [() => {}] }] }));
+  assert.equal((await h.store.getTask()).listed, 1);
+  assert.equal(await h.store.getPage("T1", 2), null);
+  (await h.store.open()).close();
+});

@@ -1,6 +1,6 @@
 // Order files and results share recovery rules; task control stays in background.js.
 globalThis.PIC_EXPERT_ORDER_DOWNLOADS = ({ db, downloads, getTask, update, assertTask, appendLog, waitForDownload }) => {
-  const { sanitizePathPart, REQUIRED_KINDS, ASSET_KINDS, manifestFiles } = globalThis.PIC_EXPERT_CORE;
+  const { sanitizePathPart, REQUIRED_KINDS, manifestFiles, fileKind, assetNames } = globalThis.PIC_EXPERT_CORE;
   const pairs = new Map(), recoveries = new Map();
   const upsertRow = async (task, changes, row) => {
     const previous = await db.getRow(task.id, row);
@@ -14,9 +14,9 @@ globalThis.PIC_EXPERT_ORDER_DOWNLOADS = ({ db, downloads, getTask, update, asser
   };
   const validateAssets = assets => {
     const formats = { ".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp" };
-    if (!assets || REQUIRED_KINDS.some(kind => !assets[kind])) throw new Error("必须提供 SN码和发票两张图片。");
-    if (Object.keys(assets).some(kind => !ASSET_KINDS.includes(kind))) throw new Error("图片类型不受支持。");
-    const kinds = ASSET_KINDS.filter(kind => Object.hasOwn(assets, kind));
+    const kinds = assetNames(assets);
+    if (!assets || REQUIRED_KINDS.some(kind => !kinds.some(name => fileKind(name) === kind))) throw new Error("必须提供 SN码和发票图片。");
+    if (kinds.some(kind => !fileKind(kind))) throw new Error("图片类型不受支持。");
     for (const kind of kinds) {
       const asset = assets[kind];
       if (!asset || !formats[asset.extension] || !asset.url?.startsWith("data:" + formats[asset.extension] + ";base64,")) throw new Error(kind + "图片格式未验证。");
@@ -55,7 +55,8 @@ globalThis.PIC_EXPERT_ORDER_DOWNLOADS = ({ db, downloads, getTask, update, asser
     await update(taskId, sender, async (_task, changes) => {
       const previous = await db.getPair(taskId, referenceNo);
       if (previous && previous.orderNo !== orderNo) throw new Error("同一参考号对应多个订单，已停止。");
-      if (!previous) changes.pairs.push({ referenceNo, orderNo, status: "pending", generation: _task.generation || 0, files: {} });
+      if (!previous) changes.pairs.push({ referenceNo, orderNo, status: "pending", generation: _task.generation || 0, files: {}, note: message.note || "" });
+      else if (message.note !== undefined && previous.note !== message.note) changes.pairs.push({ ...previous, note: message.note });
     });
     if (pairs.has(key)) return pairs.get(key);
     const promise = (async () => {
@@ -110,7 +111,8 @@ globalThis.PIC_EXPERT_ORDER_DOWNLOADS = ({ db, downloads, getTask, update, asser
       const existingRows = new Map((await db.rows(taskId)).map(row => [JSON.stringify([row.orderNo, row.referenceNo]), row]));
       for (const pair of await db.pairs(taskId)) {
         const previous = existingRows.get(JSON.stringify([pair.orderNo, pair.referenceNo]));
-        const row = previous ? { ...previous } : { orderNo: pair.orderNo, referenceNo: pair.referenceNo, result: "成功", reason: "" };
+        const row = previous ? { ...previous } : { orderNo: pair.orderNo, referenceNo: pair.referenceNo, result: "成功", reason: pair.note || "" };
+        if (pair.note && !(row.reason || "").includes(pair.note)) row.reason = [pair.note, row.reason].filter(Boolean).join("；");
         if (pair.status !== "complete") { row.result = "失败"; row.reason = [...new Set([row.reason, pair.error || "下载未完成。"].filter(Boolean))].join("；"); }
         Object.assign(row, manifestFiles(pair.files));
         if (previous && JSON.stringify(row) === JSON.stringify(previous)) continue;
@@ -121,7 +123,7 @@ globalThis.PIC_EXPERT_ORDER_DOWNLOADS = ({ db, downloads, getTask, update, asser
       await update(taskId, sender, async (task, changes) => {
         for (const identity of task.currentRows || []) {
           const previous = await db.getRow(taskId, identity);
-          await upsertRow(task, changes, { ...manifestFiles(), ...previous, ...identity, result: "失败", reason: task.error || "任务中断。" });
+          await upsertRow(task, changes, { ...manifestFiles(), ...previous, ...identity, result: "失败", reason: [identity.note, task.error || "任务中断。"].filter(Boolean).join("；") });
         }
         task.currentRows = [];
       }, false);
@@ -134,7 +136,7 @@ globalThis.PIC_EXPERT_ORDER_DOWNLOADS = ({ db, downloads, getTask, update, asser
     assertTask(task, message.taskId, sender);
     const row = await db.getRow(message.taskId, message.identity);
     if (row?.page && row.page !== task.page) throw new Error("同一订单出现在不同页，查询结果已变化。");
-    if (row?.result === "跳过") return { done: true };
+    if (row?.result === "跳过") return { done: !["材料修改", "SN码或发票图片缺失或不唯一"].includes(row.reason) };
     if (row?.result !== "成功") return { done: false };
     const pair = await db.getPair(message.taskId, message.identity.referenceNo);
     if (!pair || pair.orderNo !== message.identity.orderNo || pair.status !== "complete") return { done: false };

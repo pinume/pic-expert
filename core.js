@@ -4,7 +4,19 @@
   const PROOF_KINDS = Object.freeze(["证明材料图一", "证明材料图二", "证明材料图三"]);
   const ASSET_KINDS = Object.freeze([...REQUIRED_KINDS, ...PROOF_KINDS]);
   const FILE_FIELDS = Object.freeze(["snFile", "invoiceFile", "proof1File", "proof2File", "proof3File"]);
-  const manifestFiles = files => Object.fromEntries(ASSET_KINDS.map((kind, i) => [FILE_FIELDS[i], files?.[kind]?.filename || ""]));
+  const fileKind = name => {
+    if (ASSET_KINDS.includes(name)) return name;
+    const numbered = String(name).match(/^(SN码|发票)-([1-9]\d*)$/);
+    return numbered && Number.isSafeInteger(Number(numbered[2])) ? numbered[1] : null;
+  };
+  const assetNames = files => Object.keys(files || {}).sort((a, b) =>
+    ASSET_KINDS.indexOf(fileKind(a)) - ASSET_KINDS.indexOf(fileKind(b)) ||
+    Number(a.match(/-(\d+)$/)?.[1] || 0) - Number(b.match(/-(\d+)$/)?.[1] || 0));
+  const manifestFiles = files => {
+    const names = assetNames(files);
+    return Object.fromEntries(ASSET_KINDS.map((kind, i) => [FILE_FIELDS[i],
+      names.filter(name => fileKind(name) === kind).map(name => files[name].filename).join("\n")]));
+  };
 
   const cleanText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
@@ -47,7 +59,7 @@
   };
 
   const api = Object.freeze({ cleanText, sanitizePathPart, buildManifestCsv, makeTaskId, imageFormat,
-    REQUIRED_KINDS, PROOF_KINDS, ASSET_KINDS, FILE_FIELDS, manifestFiles });
+    REQUIRED_KINDS, PROOF_KINDS, ASSET_KINDS, FILE_FIELDS, manifestFiles, fileKind, assetNames });
   globalThis.PIC_EXPERT_CORE = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();
