@@ -284,8 +284,8 @@ for (const action of ["PAUSE", "STOP"]) for (const reportedFailure of [false, tr
     const directory = "pic-expert/" + task.folderName + "/R1/";
     assert.deepEqual(f.backend.calls.map(call => call.filename),
       [directory + "SN码.jpg", directory + "发票.png", directory + "证明材料图三.png"]);
-    assert.deepEqual([result.snFile, result.invoiceFile, result.proof1File, result.proof2File, result.proof3File],
-      [directory + "SN码.jpg", directory + "发票.png", "", "", directory + "证明材料图三.png"]);
+    assert.deepEqual(Object.values((await store.getPair(task.id, "R1")).files).map(file => file.filename),
+      [directory + "SN码.jpg", directory + "发票.png", directory + "证明材料图三.png"]);
     assert.ok(f.backend.calls.every((_call, index) => f.backend.items.get(index + 1).exists));
     assert.equal(restarted.removed.length, 0);
 

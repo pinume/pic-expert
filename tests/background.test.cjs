@@ -111,21 +111,21 @@ test("worker recovery reconciles leftover files and logs paths omitted from CSV"
   await h.send({type:"PIC_EXPERT_TASK_STOP"},{});
   const rows = h.task().manifestRows;
   assert.equal(rows.length, 1);
-  assert.equal(rows[0].snFile, "pic-expert/T1/R1/SN码.jpg");
-  assert.equal(rows[0].invoiceFile, "");
+  const files = h.task().downloads.R1.files;
+  assert.equal(files["SN码"].filename, "pic-expert/T1/R1/SN码.jpg");
+  assert.equal(files["发票"], undefined);
   assert.equal(rows[0].result, "失败");
   assert.match(rows[0].reason, /页面中断.*部分文件无法清理/);
-  assert.ok(h.task().logs.some(entry => entry.stage === "残留文件" && entry.message.includes(rows[0].snFile)));
+  assert.ok(h.task().logs.some(entry => entry.stage === "残留文件" && entry.message.includes(files["SN码"].filename)));
   assert.doesNotMatch(decodeURIComponent(h.calls[0].url), /SN码.jpg/);
   assert.equal(h.task().failed, 1);
 });
-test("rolled-back pair clears stale paths and success from an existing row", async () => {
+test("rolled-back pair clears file records and success from an existing row", async () => {
   const initial = interruptedTask("成功");
-  initial.manifestRows[0].snFile = "stale-path.jpg";
   const h = harness({}, initial);
   await h.send({type:"PIC_EXPERT_TASK_STOP"},{});
   assert.equal(h.task().manifestRows[0].result, "失败");
-  assert.equal(h.task().manifestRows[0].snFile, "");
+  assert.deepEqual(h.task().downloads.R1.files, {});
   assert.equal(h.task().completed, 0);
 });
 test("complete files retain a separately recorded failure reason", async () => {
@@ -135,7 +135,7 @@ test("complete files retain a separately recorded failure reason", async () => {
   await h.send({type:"PIC_EXPERT_TASK_STOP"},{});
   assert.equal(h.task().manifestRows[0].result, "失败");
   assert.equal(h.task().manifestRows[0].reason, "页面中断");
-  assert.match(h.task().manifestRows[0].snFile, /SN码.jpg$/);
+  assert.match(h.task().downloads.R1.files["SN码"].filename, /SN码.jpg$/);
 });
 test("retry clears obsolete CSV error when native download already completed", async () => {
   const h = harness({failManifest:true}), {task} = await h.begin();
@@ -194,7 +194,7 @@ test("duplicate messages download five files once and export a four-column CSV",
   assert.match(h.calls[3].filename, /\/R1\/证明材料图二.png$/);
   assert.match(h.calls[4].filename, /\/R1\/证明材料图三.jpg$/);
   await h.send({type:"PIC_EXPERT_TASK_END",taskId:task.id,status:"completed"});
-  assert.equal(h.task().manifestRows[0].proof2File, h.calls[3].filename);
+  assert.equal(h.task().downloads.R1.files["证明材料图二"].filename, h.calls[3].filename);
   assert.equal(decodeURIComponent(h.calls[5].url).split(",").slice(1).join(","), "\uFEFF订单号,参考号,处理结果,原因\r\nO1,R1,成功,");
 });
 test("failed proof image rolls back required and optional files and never succeeds", async () => {
@@ -205,14 +205,14 @@ test("failed proof image rolls back required and optional files and never succee
   assert.deepEqual(h.removed, [1,2,3]);
   await h.send({type:"PIC_EXPERT_TASK_END",taskId:task.id,status:"completed"});
   assert.equal(h.task().manifestRows[0].result, "失败");
-  assert.equal(h.task().manifestRows[0].proof1File, "");
+  assert.deepEqual(h.task().downloads.R1.files, {});
 });
-test("failed proof cleanup retains its path in the manifest", async () => {
+test("failed proof cleanup retains its path in download records", async () => {
   const h = harness({failProof:"证明材料图二",failRemoveId:3}), {task} = await h.begin();
   await h.send({type:"PIC_EXPERT_DOWNLOAD_PAIR",taskId:task.id,orderNo:"O1",referenceNo:"R1",assets:proofAssets});
   await h.send({type:"PIC_EXPERT_TASK_END",taskId:task.id,status:"failed"});
-  assert.match(h.task().manifestRows[0].proof1File, /证明材料图一.jpg$/);
-  assert.equal(h.task().manifestRows[0].snFile, "");
+  assert.match(h.task().downloads.R1.files["证明材料图一"].filename, /证明材料图一.jpg$/);
+  assert.equal(h.task().downloads.R1.files["SN码"], undefined);
 });
 test("missing required pair or invalid optional format creates no downloads", async () => {
   const h = harness(), {task} = await h.begin();
@@ -221,7 +221,7 @@ test("missing required pair or invalid optional format creates no downloads", as
   }
   assert.equal(h.calls.length, 0);
 });
-const checkpoint = {url:"https://portal.test/app#/auditOfTrade2026",page:1,total:2,signature:"O1::R1\nO2::R2",filters:[],visitedBefore:0};
+const checkpoint = {url:"https://portal.test/app#/auditOfTrade2026",page:1,total:2,signature:"O1::R1\nO2::R2",filters:[]};
 const saveCheckpoint = (h,id) => h.send({type:"PIC_EXPERT_CHECKPOINT",taskId:id,checkpoint});
 test("graceful pause preserves the task directory and completed files without exporting partial CSV", async () => {
   const h=harness({livePage:true}),{task}=await h.begin();
@@ -302,14 +302,6 @@ test("full-log export includes early entries beyond the popup's 500-row window",
   const text=decodeURIComponent(h.calls[0].url);
   assert.match(text,/entry-0\n/); assert.match(text,/entry-519/);
   assert.ok((await h.store.logs(task.id,Infinity)).length>500);
-});
-test("checkpoint page offsets are preserved on resume and advance only after confirmed paging", async () => {
-  const h=harness(),{task}=await h.begin();
-  await saveCheckpoint(h,task.id);
-  await h.send({type:"PIC_EXPERT_CHECKPOINT",taskId:task.id,checkpoint:{...checkpoint,visitedBefore:1}});
-  assert.equal(h.task().checkpoint.visitedBefore,0);
-  await h.send({type:"PIC_EXPERT_CHECKPOINT",taskId:task.id,checkpoint:{...checkpoint,page:2,visitedBefore:20}});
-  assert.equal(h.task().checkpoint.visitedBefore,20);
 });
 test("full-log export splits large logs into bounded segments with no omissions", async () => {
   const h=harness(),{task}=await h.begin();

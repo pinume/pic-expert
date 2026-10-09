@@ -214,9 +214,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case "PIC_EXPERT_CHECKPOINT":
         return { ok: true, task: await update(message.taskId, sender, t => {
-          const previous = t.checkpoint;
           if (t.currentRows?.length) throw new Error("当前页仍有订单正在处理，不能更新断点。");
-          t.checkpoint = { ...message.checkpoint, visitedBefore: previous?.page === message.checkpoint.page ? previous.visitedBefore : message.checkpoint.visitedBefore };
+          t.checkpoint = { ...message.checkpoint };
           t.page = message.checkpoint.page;
           t.total = message.checkpoint.total;
         }) };

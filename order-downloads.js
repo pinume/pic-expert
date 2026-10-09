@@ -1,6 +1,6 @@
 // Order files and results share recovery rules; task control stays in background.js.
 globalThis.PIC_EXPERT_ORDER_DOWNLOADS = ({ db, downloads, getTask, update, assertTask, appendLog, waitForDownload }) => {
-  const { sanitizePathPart, REQUIRED_KINDS, manifestFiles, fileKind, assetNames } = globalThis.PIC_EXPERT_CORE;
+  const { sanitizePathPart, REQUIRED_KINDS, fileKind, assetNames } = globalThis.PIC_EXPERT_CORE;
   const pairs = new Map(), recoveries = new Map();
   const upsertRow = async (task, changes, row) => {
     const previous = await db.getRow(task.id, row);
@@ -114,7 +114,6 @@ globalThis.PIC_EXPERT_ORDER_DOWNLOADS = ({ db, downloads, getTask, update, asser
         const row = previous ? { ...previous } : { orderNo: pair.orderNo, referenceNo: pair.referenceNo, result: "成功", reason: pair.note || "" };
         if (pair.note && !(row.reason || "").includes(pair.note)) row.reason = [pair.note, row.reason].filter(Boolean).join("；");
         if (pair.status !== "complete") { row.result = "失败"; row.reason = [...new Set([row.reason, pair.error || "下载未完成。"].filter(Boolean))].join("；"); }
-        Object.assign(row, manifestFiles(pair.files));
         if (previous && JSON.stringify(row) === JSON.stringify(previous)) continue;
         await update(taskId, sender, async (task, changes) => {
           await upsertRow(task, changes, row);
@@ -123,7 +122,7 @@ globalThis.PIC_EXPERT_ORDER_DOWNLOADS = ({ db, downloads, getTask, update, asser
       await update(taskId, sender, async (task, changes) => {
         for (const identity of task.currentRows || []) {
           const previous = await db.getRow(taskId, identity);
-          await upsertRow(task, changes, { ...manifestFiles(), ...previous, ...identity, result: "失败", reason: [identity.note, task.error || "任务中断。"].filter(Boolean).join("；") });
+          await upsertRow(task, changes, { ...previous, ...identity, result: "失败", reason: [identity.note, task.error || "任务中断。"].filter(Boolean).join("；") });
         }
         task.currentRows = [];
       }, false);

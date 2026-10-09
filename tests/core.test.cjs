@@ -22,7 +22,7 @@ test("extension derives from actual bytes, not an extensionless URL", () => {
   assert.throws(() => core.imageFormat(Buffer.from("<html>login</html>")), /无法识别/);
 });
 test("manifest contains only four columns even when image paths exist", () => {
-  const row = {orderNo:"O1",referenceNo:"R1",result:"成功",reason:"",...core.manifestFiles({"SN码":{filename:"SN码.jpg"},"发票":{filename:"发票.jpg"},"证明材料图三":{filename:"证明材料图三.png"}})};
+  const row = {orderNo:"O1",referenceNo:"R1",result:"成功",reason:"",snFile:"SN码.jpg",invoiceFile:"发票.jpg",proof3File:"证明材料图三.png"};
   const csv = core.buildManifestCsv([row]).split("\r\n");
   assert.equal(csv[0], "\uFEFF订单号,参考号,处理结果,原因");
   assert.equal(csv[1], "O1,R1,成功,");

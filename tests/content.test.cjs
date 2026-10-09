@@ -134,7 +134,7 @@ test("a changed query filter stops before processing the next order", async () =
 
 test("resume verifies the API query and checkpoint page signature", async () => {
   const h = harness([[row("O1", "R1"), row("O2", "R2")] ]);
-  await h.run("T1", { url: h.context.url, page: 1, total: 2, signature: "wrong", filters: [], query: { status: ["01"] }, size: 2, visitedBefore: 0 });
+  await h.run("T1", { url: h.context.url, page: 1, total: 2, signature: "wrong", filters: [], query: { status: ["01"] }, size: 2 });
   assert.equal(h.calls.length, 0);
   assert.equal(h.messages.at(-1).type, "PIC_EXPERT_TASK_AUTO_PAUSE");
   assert.match(h.messages.at(-1).error, /查询与断点不同/);
@@ -142,7 +142,7 @@ test("resume verifies the API query and checkpoint page signature", async () => 
 
 test("legacy checkpoints continue only when the saved page still matches", async () => {
   const h = harness([[row("O1", "R1"), row("O2", "R2")], [row("O3", "R3")]], { listSize: 10000 });
-  await h.run("T1", { url: h.context.url, page: 1, total: 3, signature: "O1::R1\nO2::R2", filters: [], visitedBefore: 0 });
+  await h.run("T1", { url: h.context.url, page: 1, total: 3, signature: "O1::R1\nO2::R2", filters: [] });
   assert.deepEqual(h.calls.map(c => c.size), [2, 2]);
   assert.equal(h.messages.at(-1).status, "completed");
 });
@@ -236,7 +236,7 @@ test("resume rescans every page, retries failures and missing files, and preserv
 
 test("changed checkpoint page stops before retrying earlier pages", async () => {
   const h = harness([[row("O1", "R1"), row("O2", "R2")], [row("O3", "R3")]]);
-  await h.run("T1", { url: h.context.url, page: 2, total: 3, signature: "wrong", filters: [], size: 2, visitedBefore: 2 });
+  await h.run("T1", { url: h.context.url, page: 2, total: 3, signature: "wrong", filters: [], size: 2 });
   assert.equal(h.messages.some(m => m.type === "PIC_EXPERT_ROW_BEGIN"), false);
   assert.match(h.messages.at(-1).error, /断点页订单集合/);
 });

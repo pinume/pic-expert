@@ -4,7 +4,6 @@
   const CORE = globalThis.PIC_EXPERT_PAGE_CORE;
   const FILES = globalThis.PIC_EXPERT_CORE;
   const SITE = globalThis.PIC_EXPERT_SITE_API;
-  const clean = value => String(value ?? "").replace(/\s+/g, " ").trim();
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   let running = false, stopped = false, pauseRequested = false, forcePauseRequested = false, activeTaskId = null;
   let requestController = null;
@@ -24,7 +23,7 @@
   const pageContext = () => SITE.context(document, location);
   const legacyFilters = () => [...document.querySelectorAll(".search-item")].map(item => {
     const input = item.querySelector("input");
-    return input ? { label: clean(item.querySelector("label")?.textContent || item.firstChild?.textContent), value: input.value } : null;
+    return input ? { label: FILES.cleanText(item.querySelector("label")?.textContent || item.firstChild?.textContent), value: input.value } : null;
   }).filter(Boolean);
   const taskFetch = async (url, options = {}) => {
     const signal = AbortSignal.any([requestController.signal, options.signal].filter(Boolean));
@@ -65,17 +64,17 @@
     });
     return { url: urlData, extension: format.extension };
   };
-  const identity = row => ({ orderNo: clean(row.merOrderId), referenceNo: clean(row.transRef) });
+  const identity = row => ({ orderNo: FILES.cleanText(row.merOrderId), referenceNo: FILES.cleanText(row.transRef) });
   const processRow = async (row, client, taskId, ensureActive, note) => {
-    const id = identity(row), empty = { ...id, ...FILES.manifestFiles() };
-    if (!id.orderNo || !id.referenceNo) return { ...empty, result: "失败", reason: "订单号或参考号缺失" };
+    const id = identity(row);
+    if (!id.orderNo || !id.referenceNo) return { ...id, result: "失败", reason: "订单号或参考号缺失" };
     const reason = message => [note, message].filter(Boolean).join("；");
     try {
       await log("读取详情", "订单 " + id.orderNo + "，参考号 " + id.referenceNo);
       const states = await client.assets(row, location.origin);
       ensureActive();
       if (FILES.REQUIRED_KINDS.some(kind => !states[kind]?.length)) {
-        return { ...empty, result: "跳过", reason: reason("SN码或发票图片缺失") };
+        return { ...id, result: "跳过", reason: reason("SN码或发票图片缺失") };
       }
       for (const kind of FILES.PROOF_KINDS) {
         if (states[kind].length > 1) throw new Error(kind + "图片不唯一，已停止该订单下载。");
@@ -103,11 +102,11 @@
       if (failure) throw failure.reason;
       for (const kind of FILES.PROOF_KINDS) if (!assets[kind]) await log("证明材料", kind + "为空，跳过");
       ensureActive();
-      const downloaded = await checkedSend({ type: "PIC_EXPERT_DOWNLOAD_PAIR", taskId, ...id, assets: prepared, note });
-      return { ...id, result: "成功", reason: note, ...FILES.manifestFiles(downloaded.files) };
+      await checkedSend({ type: "PIC_EXPERT_DOWNLOAD_PAIR", taskId, ...id, assets: prepared, note });
+      return { ...id, result: "成功", reason: note };
     } catch (error) {
       if (error.auth || error.fatal) { requestController.abort(error); throw error; }
-      return { ...empty, result: "失败", reason: reason(error.message), ...FILES.manifestFiles(error.files) };
+      return { ...id, result: "失败", reason: reason(error.message) };
     }
   };
   const loadPage = async (client, context, page, total = null) => {
@@ -165,7 +164,7 @@
       }
       await checkedSend({ type: "PIC_EXPERT_LIST_BEGIN", taskId, checkpoint: {
         url: context.url, page: 1, total: null, signature: null,
-        query: context.filters, size: context.size, visitedBefore: 0
+        query: context.filters, size: context.size
       } });
       const client = getClient();
       await log("任务启动", "先通过网站接口读取完整订单列表");
@@ -177,7 +176,7 @@
         displayedPage = await loadPage(client, context, 0, displayedPage.total);
         await checkedSend({ type: "PIC_EXPERT_CHECKPOINT", taskId, checkpoint: {
           url: context.url, page: 1, total: displayedPage.total, signature: null,
-          query: context.filters, size: listSize, visitedBefore: 0
+          query: context.filters, size: listSize
         } });
       }
       const visibleStart = (initialContext.visiblePage.page - 1) * initialContext.size;
@@ -220,7 +219,7 @@
         if (!result) throw new Error("已保存的订单列表缺失，请停止并开始新任务。");
         await checkedSend({ type: "PIC_EXPERT_CHECKPOINT", taskId, checkpoint: {
           url: context.url, page: page + 1, total, signature: SITE.signature(result.rows),
-          query: context.filters, size: context.size, visitedBefore: visited
+          query: context.filters, size: context.size
         } });
         let cursor = 0;
         const workers = Array.from({ length: Math.min(3, result.rows.length) }, async () => {

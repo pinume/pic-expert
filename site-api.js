@@ -9,7 +9,7 @@
     ["已退回/商家审核未通过", ["08"]], ["已退回/核销未通过", ["H03"]],
     ["已退回/审核未通过", ["S03"]], ["已退回/审核已终止", ["S04"]]
   ]);
-  const clean = value => String(value ?? "").replace(/\s+/g, " ").trim();
+  const { cleanText } = globalThis.PIC_EXPERT_CORE;
   const parseJson = value => typeof value === "string" ? JSON.parse(value) : value;
   const parseRange = (value, name) => {
     if (!value) throw new Error(name + "不能为空。");
@@ -22,12 +22,12 @@
     return parts;
   };
   const byLabel = (doc, label) => [...doc.querySelectorAll(".search-item")].find(item =>
-    clean(item.querySelector("label")?.textContent).replace(/[＊*]/g, "") === label);
-  const inputValue = (doc, label) => clean(byLabel(doc, label)?.querySelector("input")?.value);
+    cleanText(item.querySelector("label")?.textContent).replace(/[＊*]/g, "") === label);
+  const inputValue = (doc, label) => cleanText(byLabel(doc, label)?.querySelector("input")?.value);
   const selectedStatuses = item => {
-    const tags = [...item.querySelectorAll(".el-tag__content")].map(tag => clean(tag.textContent)).filter(Boolean);
+    const tags = [...item.querySelectorAll(".el-tag__content")].map(tag => cleanText(tag.textContent)).filter(Boolean);
     if (!tags.length) {
-      const text = clean(item.querySelector(".el-input__inner")?.value);
+      const text = cleanText(item.querySelector(".el-input__inner")?.value);
       if (text) throw new Error("订单状态筛选无法安全识别。");
       return [];
     }
@@ -54,19 +54,19 @@
     const tables = [...doc.querySelectorAll(".el-table")];
     if (tables.length !== 1) throw new Error("无法唯一识别当前订单列表。");
     const table = tables[0];
-    const headers = [...table.querySelectorAll(".el-table__header-wrapper thead th")].map(cell => clean(cell.textContent).replace(/\s/g, ""));
+    const headers = [...table.querySelectorAll(".el-table__header-wrapper thead th")].map(cell => cleanText(cell.textContent).replace(/\s/g, ""));
     const orderColumn = headers.findIndex(value => /^(订单号|订单编号|业务订单号)$/.test(value));
     const referenceColumn = headers.findIndex(value => /^(参考号|检索参考号|交易参考号)$/.test(value));
     if (orderColumn < 0 || referenceColumn < 0) throw new Error("无法识别当前列表的订单身份列。");
     const rows = [...table.querySelectorAll(".el-table__body-wrapper tbody tr")].filter(row => row.querySelectorAll("td").length);
     const identities = rows.map(row => {
       const cells = [...row.querySelectorAll("td")];
-      return { orderNo: clean(cells[orderColumn]?.textContent), referenceNo: clean(cells[referenceColumn]?.textContent) };
+      return { orderNo: cleanText(cells[orderColumn]?.textContent), referenceNo: cleanText(cells[referenceColumn]?.textContent) };
     });
     if (identities.some(identity => !identity.orderNo || !identity.referenceNo)) throw new Error("当前列表的订单身份不完整。");
     const pager = doc.querySelector(".el-pagination");
     const page = Number(pager?.querySelector(".el-pager .active")?.textContent);
-    const totalText = clean(pager?.querySelector(".el-pagination__total")?.textContent);
+    const totalText = cleanText(pager?.querySelector(".el-pagination__total")?.textContent);
     const total = Number(totalText.match(/共\s*(\d+)\s*条/)?.[1]);
     if (!Number.isInteger(page) || page < 1 || !Number.isInteger(total)) throw new Error("无法识别当前列表页码或总数。");
     return { page, total, signature: identities.map(identity => identity.orderNo + "::" + identity.referenceNo).join("\n") };
@@ -89,7 +89,7 @@
     catch { return false; }
   };
   const signature = rows => rows.map(row => {
-    const order = clean(row.merOrderId), reference = clean(row.transRef);
+    const order = cleanText(row.merOrderId), reference = cleanText(row.transRef);
     return order + "::" + reference;
   }).join("\n");
   const request = async (path, body, token, fetcher = fetch) => {
@@ -118,7 +118,7 @@
     try { result = await response.json(); }
     catch { throw new Error("网站接口返回内容无法识别。"); }
     if (!(result?.success === true || result?.code === 0)) {
-      const message = clean(result?.message);
+      const message = cleanText(result?.message);
       const auth = /登录|token|认证|未授权|过期/i.test(message);
       const error = new Error(auth ? "登录状态已失效，请重新登录并恢复原查询。" : message || "网站接口拒绝了请求。");
       error.auth = auth;
@@ -151,7 +151,7 @@
           if (item?.type !== "img") continue;
           const kind = globalThis.PIC_EXPERT_PAGE_CORE.assetKind(item.desc || item.name);
           if (!kind || !item.key) continue;
-          const value = clean(product[item.key]);
+          const value = cleanText(product[item.key]);
           if (!value) continue;
           const url = imageUrl(value, origin, token);
           (found[kind] ||= new Set()).add(url);

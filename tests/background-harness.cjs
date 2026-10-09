@@ -24,7 +24,6 @@ function harness(options = {}, initial = null) {
       set: async value => { stored = structuredClone(value.picExpertTask); }
     } },
     runtime: { getURL: file => "chrome-extension://test-extension/" + file, onMessage: { addListener: f => { listener = f; } } },
-    action: { onClicked: { addListener() {} } },
     tabs: { onUpdated: { addListener() {} }, onRemoved: { addListener() {} },
       sendMessage: async (_tab, message) => options.pageMessage ? options.pageMessage(message) : ({ ok: true, running: Boolean(options.livePage) }) },
     downloads: {
